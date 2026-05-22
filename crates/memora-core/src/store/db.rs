@@ -200,6 +200,15 @@ impl Store {
         Ok(())
     }
 
+    /// Delete a node from the live working set. Idempotent: deleting a
+    /// missing node is a no-op rather than an error, because that's what
+    /// `apply_plan_to_working_set` wants.
+    pub fn delete_node(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM nodes WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     // --- commit CRUD ------------------------------------------------------
 
     /// Persist a commit row.
@@ -233,6 +242,52 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Persist additional merge parents for a commit. The first parent
+    /// lives in `commits.parent_id`; every entry here is parent #2 onward,
+    /// ordered by their position in `extra_parents`.
+    pub fn insert_merge_parents(&self, commit_id: &str, extra_parents: &[String]) -> Result<()> {
+        if extra_parents.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO merge_parents (commit_id, parent_id, sequence) VALUES (?1, ?2, ?3)",
+            )?;
+            for (idx, p) in extra_parents.iter().enumerate() {
+                stmt.execute(params![commit_id, p, idx as i64])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Read the *additional* (post-first) parents of a commit, in
+    /// `sequence` order. Returns an empty vec for non-merge commits.
+    pub fn merge_parents(&self, commit_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT parent_id FROM merge_parents WHERE commit_id = ?1 ORDER BY sequence ASC",
+        )?;
+        let rows = stmt.query_map(params![commit_id], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Return the full set of parents (first + extras) for a commit.
+    pub fn all_parents(&self, commit_id: &str) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        if let Some(c) = self.get_commit(commit_id)? {
+            if let Some(p) = c.parent {
+                out.push(p);
+            }
+        }
+        out.extend(self.merge_parents(commit_id)?);
+        Ok(out)
     }
 
     /// Persist the full per-node state snapshot for a commit. Called once
@@ -362,34 +417,54 @@ impl Store {
     /// Compute an [`UnstagedSummary`] comparing the current node table to
     /// the given baseline commit (typically HEAD). Pass `None` for the
     /// "no commits yet" case — every existing node is reported as added.
+    ///
+    /// "Modified" means the node id matches but its state differs from
+    /// the snapshot in the baseline commit's `node_versions` rows. We
+    /// don't compare timestamps here because user-supplied `updated_at`
+    /// values can run ahead of commit timestamps in tests / scripted
+    /// pipelines.
     pub fn unstaged_against(&self, head_commit: Option<&str>) -> Result<UnstagedSummary> {
         let current = self.all_nodes()?;
-        let baseline_ids: std::collections::HashSet<String> = match head_commit {
-            Some(id) => self.commit_node_ids(id)?.into_iter().collect(),
-            None => std::collections::HashSet::new(),
+        let baseline_versions: std::collections::HashMap<String, MemoryNode> = match head_commit {
+            Some(id) => self
+                .commit_node_versions(id)?
+                .into_iter()
+                .map(|n| (n.id.clone(), n))
+                .collect(),
+            None => std::collections::HashMap::new(),
         };
         let mut summary = UnstagedSummary {
             total: current.len(),
             ..Default::default()
         };
-        let baseline_commit_ts = match head_commit {
-            Some(id) => self.get_commit(id)?.map(|c| c.timestamp).unwrap_or(0),
-            None => 0,
-        };
         let mut current_ids = std::collections::HashSet::new();
         for node in current {
             current_ids.insert(node.id.clone());
-            if !baseline_ids.contains(&node.id) {
-                summary.added.push(node);
-            } else if node.updated_at > baseline_commit_ts {
-                summary.modified.push(node);
+            match baseline_versions.get(&node.id) {
+                None => summary.added.push(node),
+                Some(prev) => {
+                    if !nodes_equivalent(prev, &node) {
+                        summary.modified.push(node);
+                    }
+                }
             }
         }
-        for id in baseline_ids.difference(&current_ids) {
-            summary.removed.push(id.clone());
+        for id in baseline_versions.keys() {
+            if !current_ids.contains(id) {
+                summary.removed.push(id.clone());
+            }
         }
         Ok(summary)
     }
+}
+
+fn nodes_equivalent(a: &MemoryNode, b: &MemoryNode) -> bool {
+    a.kind == b.kind
+        && a.content == b.content
+        && (a.confidence - b.confidence).abs() <= 0.001
+        && a.status == b.status
+        && a.source == b.source
+        && a.evidence == b.evidence
 }
 
 fn row_to_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryNode> {

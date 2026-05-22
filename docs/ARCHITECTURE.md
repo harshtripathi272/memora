@@ -68,17 +68,38 @@ timestamps deterministically.
 `Store`, holds a `Clock`, and exposes intent-revealing methods:
 - `init`, `open`, `discover`, `open_from`
 - `add_node`, `status`, `commit`, `log`
-- `create_branch`, `list_branches`, `switch_branch`
+- `create_branch`, `list_branches`, `switch_branch` (rewrites the working
+  set to match the target tip; refuses with uncommitted changes)
 - `rollback_to` (auto-checkpoints before moving HEAD)
 - `promote` (ephemeral → stable, by id / kind / confidence threshold)
 - `diff` (graph diff between two revspecs, with optional semantic summary)
 - `resolve_revision` (`HEAD`, `HEAD~N`, branch names, hex prefixes)
+- `plan_merge` / `merge` (three-way merge with auto / ours / theirs
+  strategies; produces fast-forward, merge commit, or surfaced conflicts)
 
 The diff engine compares two `node_versions` snapshots from the SQLite
 store and produces a `DiffReport` with `added` / `removed` / `modified`
 buckets. `ModifiedNode` carries a list of typed `NodeChange` deltas
 (`Status`, `Content`, `Confidence`, `Source`, `Evidence`) so callers can
 render high-level summaries without parsing strings.
+
+### `merge.rs`
+Pure three-way merge engine. Walks both parent DAGs to find the merge
+base, then for each node id decides:
+
+1. *Unchanged* on both sides → keep.
+2. Changed on exactly one side → take that side.
+3. Changed on both sides → score by **confidence → source priority →
+   status priority → recency**. The winning side is `Auto { ours_won }`.
+   Genuine ties are returned as `Conflicted`, written into the working
+   set as `MemoryStatus::Conflicted`, and surfaced via the merge commit
+   stats.
+4. `--strategy=ours` / `--strategy=theirs` skips scoring and forces the
+   choice without producing conflicts.
+
+Merge commits store their first parent in `commits.parent_id` (so
+first-parent log walks keep working) and additional parents in the
+`merge_parents` table.
 
 ## Crate: `memora-cli`
 
@@ -109,14 +130,14 @@ Centralised printing helpers (timestamps, short ids, error formatter).
 
 ## What's not built yet
 
-The roadmap in `README.md` calls out Phase 3 → Phase 5. Notable gaps:
+The roadmap in `README.md` calls out Phase 4 → Phase 5. Notable gaps:
 
-- CRDT merge (`memora merge`).
 - Replay (`memora replay`, session event recording).
 - Export / import adapters (`memora export --to=claude-code`, etc.).
 - GC + remote sync.
+- Semantic-overlap detection during merge (different ids, same fact).
 
 The internal types and SQLite tables already make room for these (see
-`sessions` / `session_events`, `MemoryStatus::Conflicted`, the per-commit
-`node_versions` snapshot table); we'll layer the workflows on top in
-subsequent commits.
+`sessions` / `session_events`, the per-commit `node_versions` snapshot
+table, `merge_parents`); we'll layer the workflows on top in subsequent
+commits.

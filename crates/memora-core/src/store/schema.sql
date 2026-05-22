@@ -70,6 +70,18 @@ CREATE TABLE IF NOT EXISTS node_versions (
 
 CREATE INDEX IF NOT EXISTS idx_node_versions_node ON node_versions (node_id);
 
+-- Merge commits store their *first* parent in commits.parent_id (so the
+-- existing first-parent walk keeps working). Any *additional* parents
+-- live here, ordered by sequence (0 = first additional parent, 1 = next…).
+CREATE TABLE IF NOT EXISTS merge_parents (
+    commit_id TEXT    NOT NULL REFERENCES commits(id) ON DELETE CASCADE,
+    parent_id TEXT    NOT NULL,
+    sequence  INTEGER NOT NULL,
+    PRIMARY KEY (commit_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_merge_parents_commit ON merge_parents (commit_id);
+
 -- Replay infrastructure. Sessions and their event streams are written here
 -- so future `memora replay` can step through context evolution.
 CREATE TABLE IF NOT EXISTS sessions (

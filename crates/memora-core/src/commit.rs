@@ -109,14 +109,30 @@ pub fn commit_id(
     message: &str,
     timestamp: i64,
 ) -> String {
-    let canonical = format!(
-        "v1\nparent:{}\ntree:{}\nauthor:{}\nts:{}\nmsg:{}",
-        parent.unwrap_or(""),
-        tree_id,
-        author,
-        timestamp,
-        message,
+    commit_id_with_parents(parent, &[], tree_id, author, message, timestamp)
+}
+
+/// Same as [`commit_id`] but takes any number of *additional* parents past
+/// the first. The list is ordered: the first element is parent #2, etc.
+/// Used by merge commits.
+pub fn commit_id_with_parents(
+    first_parent: Option<&str>,
+    extra_parents: &[String],
+    tree_id: &str,
+    author: &str,
+    message: &str,
+    timestamp: i64,
+) -> String {
+    let mut canonical = format!(
+        "v1\nparent:{}\n",
+        first_parent.unwrap_or(""),
     );
+    for (idx, p) in extra_parents.iter().enumerate() {
+        canonical.push_str(&format!("parent{}:{}\n", idx + 2, p));
+    }
+    canonical.push_str(&format!(
+        "tree:{tree_id}\nauthor:{author}\nts:{timestamp}\nmsg:{message}",
+    ));
     sha256_hex(canonical.as_bytes())
 }
 

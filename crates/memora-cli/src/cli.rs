@@ -53,6 +53,9 @@ pub enum Command {
 
     /// Show what changed between two commits (or commit vs working set).
     Diff(DiffArgs),
+
+    /// Merge another branch (or commit) into HEAD.
+    Merge(MergeArgs),
 }
 
 /// Arguments for `memora init`.
@@ -197,4 +200,57 @@ pub struct DiffArgs {
     /// Include a natural-language summary of belief changes.
     #[arg(long)]
     pub semantic: bool,
+}
+
+/// Arguments for `memora merge`.
+#[derive(Debug, clap::Args)]
+pub struct MergeArgs {
+    /// Branch (or commit) whose memory to merge into HEAD.
+    #[arg(value_name = "BRANCH")]
+    pub branch: String,
+
+    /// Strategy for resolving same-id divergences.
+    #[arg(long, value_enum, default_value_t = MergeStrategyArg::Auto)]
+    pub strategy: MergeStrategyArg,
+
+    /// Disable fast-forward; always create a merge commit.
+    #[arg(long = "no-ff")]
+    pub no_ff: bool,
+
+    /// Apply the merge to the working set without committing.
+    #[arg(long = "no-commit")]
+    pub no_commit: bool,
+
+    /// Override the auto-generated merge commit message.
+    #[arg(short = 'm', long, value_name = "MESSAGE")]
+    pub message: Option<String>,
+
+    /// Plan only — print what would happen and exit without changing anything.
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
+
+    /// Author for the merge commit.
+    #[arg(long, default_value = "human")]
+    pub author: String,
+}
+
+/// Convenience clap enum mirroring [`memora_core::MergeStrategy`].
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum MergeStrategyArg {
+    /// Score the two sides; mark genuine ties as conflicts.
+    Auto,
+    /// On any divergence, keep `ours`.
+    Ours,
+    /// On any divergence, keep `theirs`.
+    Theirs,
+}
+
+impl From<MergeStrategyArg> for memora_core::MergeStrategy {
+    fn from(v: MergeStrategyArg) -> Self {
+        match v {
+            MergeStrategyArg::Auto => memora_core::MergeStrategy::Auto,
+            MergeStrategyArg::Ours => memora_core::MergeStrategy::Ours,
+            MergeStrategyArg::Theirs => memora_core::MergeStrategy::Theirs,
+        }
+    }
 }
