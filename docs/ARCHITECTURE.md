@@ -76,6 +76,9 @@ timestamps deterministically.
 - `resolve_revision` (`HEAD`, `HEAD~N`, branch names, hex prefixes)
 - `plan_merge` / `merge` (three-way merge with auto / ours / theirs
   strategies; produces fast-forward, merge commit, or surfaced conflicts)
+- `start_session` / `end_session` / `record_event` / `session_events`
+  / `list_sessions` (the flight recorder)
+- `ranked_nodes` / `export` (importance-scored ranking + format adapters)
 
 The diff engine compares two `node_versions` snapshots from the SQLite
 store and produces a `DiffReport` with `added` / `removed` / `modified`
@@ -100,6 +103,22 @@ base, then for each node id decides:
 Merge commits store their first parent in `commits.parent_id` (so
 first-parent log walks keep working) and additional parents in the
 `merge_parents` table.
+
+### `session.rs` and `export.rs`
+Two small modules that round out the agent-tooling story.
+
+`session.rs` defines `Session` + `SessionEvent` + `SessionEventKind`.
+`Repository` writes a marker file `.memora/sessions/CURRENT` containing
+the active session id; while a session is active, `add_node`, `commit`,
+`promote`, and `merge` all append a typed event to `session_events`.
+`memora replay` walks that event stream with optional `--step` pacing.
+
+`export.rs` is a set of pure renderers (`&[MemoryNode] → String`) for
+`CLAUDE.md`, `.cursorrules`, `.clinerules`, OpenAI Assistants JSON, and
+raw JSON. The repository pre-ranks nodes using the importance formula
+`confidence × 0.4 + recency × 0.3 + access × 0.3` (configurable via
+`ImportanceWeights`) and applies an `ExportFilter` (kinds, statuses,
+min confidence, top N) before handing the nodes to the renderer.
 
 ## Crate: `memora-cli`
 
@@ -130,11 +149,10 @@ Centralised printing helpers (timestamps, short ids, error formatter).
 
 ## What's not built yet
 
-The roadmap in `README.md` calls out Phase 4 → Phase 5. Notable gaps:
+The roadmap in `README.md` calls out Phase 5. Notable gaps:
 
-- Replay (`memora replay`, session event recording).
-- Export / import adapters (`memora export --to=claude-code`, etc.).
-- GC + remote sync.
+- `memora import` (round-trip from `CLAUDE.md` / `.cursorrules` files).
+- GC + remote sync (`memora gc`, `memora push`, `memora pull`).
 - Semantic-overlap detection during merge (different ids, same fact).
 
 The internal types and SQLite tables already make room for these (see

@@ -12,6 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::commit::{CommitStats, MemoryCommit};
 use crate::error::{MemoraError, Result};
 use crate::node::{MemoryKind, MemoryNode, MemorySource, MemoryStatus};
+use crate::session::{Session, SessionEvent, SessionEventKind};
 
 const SCHEMA_SQL: &str = include_str!("schema.sql");
 
@@ -290,6 +291,138 @@ impl Store {
         Ok(out)
     }
 
+    // --- session CRUD ----------------------------------------------------
+
+    /// Insert a brand new session row.
+    pub fn insert_session(&self, session: &Session) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO sessions (id, started_at, ended_at, source, event_count)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                session.id,
+                session.started_at,
+                session.ended_at,
+                session.source,
+                session.event_count
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Update an existing session — used to set `ended_at` and the
+    /// final `event_count`.
+    pub fn update_session(&self, session: &Session) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE sessions SET started_at = ?2, ended_at = ?3, source = ?4, event_count = ?5 WHERE id = ?1",
+            params![
+                session.id,
+                session.started_at,
+                session.ended_at,
+                session.source,
+                session.event_count
+            ],
+        )?;
+        if changed == 0 {
+            return Err(MemoraError::Invalid(format!(
+                "session not found: {}",
+                session.id
+            )));
+        }
+        Ok(())
+    }
+
+    /// Fetch a session by id (full or short prefix).
+    pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, started_at, ended_at, source, event_count FROM sessions WHERE id = ?1",
+        )?;
+        stmt.query_row(params![id], row_to_session)
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Resolve a session id prefix to the full id. Returns
+    /// `Err(Invalid)` for ambiguous prefixes.
+    pub fn resolve_session_prefix(&self, prefix: &str) -> Result<String> {
+        if prefix.len() < 4 {
+            return Err(MemoraError::Invalid(
+                "session id must be at least 4 characters".into(),
+            ));
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM sessions WHERE id LIKE ?1 || '%' LIMIT 2")?;
+        let rows = stmt.query_map(params![prefix], |r| r.get::<_, String>(0))?;
+        let mut matches = Vec::new();
+        for r in rows {
+            matches.push(r?);
+        }
+        match matches.len() {
+            0 => Err(MemoraError::Invalid(format!(
+                "no session matches prefix '{prefix}'"
+            ))),
+            1 => Ok(matches.pop().unwrap()),
+            _ => Err(MemoraError::Invalid(format!(
+                "ambiguous session prefix '{prefix}'"
+            ))),
+        }
+    }
+
+    /// List sessions, newest first.
+    pub fn list_sessions(&self, limit: Option<usize>) -> Result<Vec<Session>> {
+        let sql = match limit {
+            Some(n) => format!(
+                "SELECT id, started_at, ended_at, source, event_count FROM sessions ORDER BY started_at DESC LIMIT {n}"
+            ),
+            None => "SELECT id, started_at, ended_at, source, event_count FROM sessions ORDER BY started_at DESC".to_string(),
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], row_to_session)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Append an event to a session. Increments `event_count` atomically.
+    pub fn append_session_event(
+        &self,
+        session_id: &str,
+        timestamp: i64,
+        kind: SessionEventKind,
+        data: &serde_json::Value,
+    ) -> Result<i64> {
+        let tx = self.conn.unchecked_transaction()?;
+        let payload = serde_json::to_string(data)?;
+        tx.execute(
+            "INSERT INTO session_events (session_id, timestamp, event_type, data_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, timestamp, kind.as_str(), payload],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.execute(
+            "UPDATE sessions SET event_count = event_count + 1 WHERE id = ?1",
+            params![session_id],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Read every event for a session, in append order.
+    pub fn session_events(&self, session_id: &str) -> Result<Vec<SessionEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, timestamp, event_type, data_json
+             FROM session_events WHERE session_id = ?1 ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], row_to_event)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Persist the full per-node state snapshot for a commit. Called once
     /// per commit alongside [`Self::insert_commit_nodes`].
     pub fn insert_node_versions(&self, commit_id: &str, nodes: &[MemoryNode]) -> Result<()> {
@@ -555,6 +688,39 @@ fn to_sqlite_err(err: MemoraError) -> rusqlite::Error {
 
 fn serde_to_sqlite_err(err: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+}
+
+fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
+    Ok(Session {
+        id: row.get(0)?,
+        started_at: row.get(1)?,
+        ended_at: row.get(2)?,
+        source: row.get(3)?,
+        event_count: row.get(4)?,
+    })
+}
+
+fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionEvent> {
+    let kind_str: String = row.get(3)?;
+    let kind = SessionEventKind::parse(&kind_str).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(MemoraError::Invalid(format!(
+                "unknown session event kind '{kind_str}'"
+            ))),
+        )
+    })?;
+    let data_json: String = row.get(4)?;
+    let data: serde_json::Value =
+        serde_json::from_str(&data_json).map_err(serde_to_sqlite_err)?;
+    Ok(SessionEvent {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        timestamp: row.get(2)?,
+        kind,
+        data,
+    })
 }
 
 #[cfg(test)]

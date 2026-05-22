@@ -56,6 +56,15 @@ pub enum Command {
 
     /// Merge another branch (or commit) into HEAD.
     Merge(MergeArgs),
+
+    /// Manage recording sessions (`start`, `end`, `current`, `list`).
+    Session(SessionArgs),
+
+    /// Replay a recorded session as a step-through event log.
+    Replay(ReplayArgs),
+
+    /// Export the working set into another tool's format.
+    Export(ExportArgs),
 }
 
 /// Arguments for `memora init`.
@@ -253,4 +262,88 @@ impl From<MergeStrategyArg> for memora_core::MergeStrategy {
             MergeStrategyArg::Theirs => memora_core::MergeStrategy::Theirs,
         }
     }
+}
+
+/// Arguments for `memora session`.
+#[derive(Debug, clap::Args)]
+pub struct SessionArgs {
+    #[command(subcommand)]
+    pub command: SessionCommand,
+}
+
+/// `memora session` subcommands.
+#[derive(Debug, clap::Subcommand)]
+pub enum SessionCommand {
+    /// Start a new recording session.
+    Start(SessionStartArgs),
+    /// End the active session.
+    End,
+    /// Print the active session id, if any.
+    Current,
+    /// List recent sessions.
+    List(SessionListArgs),
+}
+
+/// Arguments for `memora session start`.
+#[derive(Debug, clap::Args)]
+pub struct SessionStartArgs {
+    /// Tool / actor that owns this session. Free-form string, but
+    /// `claude_code`, `cursor`, `cline`, `openhands`, `manual` are the
+    /// canonical values.
+    #[arg(long, default_value = "manual")]
+    pub source: String,
+}
+
+/// Arguments for `memora session list`.
+#[derive(Debug, clap::Args)]
+pub struct SessionListArgs {
+    /// Limit to the N most recent sessions.
+    #[arg(short = 'n', long)]
+    pub limit: Option<usize>,
+}
+
+/// Arguments for `memora replay`.
+#[derive(Debug, clap::Args)]
+pub struct ReplayArgs {
+    /// Session id (full or short prefix). Defaults to the active session.
+    #[arg(long = "session", value_name = "ID")]
+    pub session: Option<String>,
+
+    /// Pause after each event and wait for Enter before continuing.
+    #[arg(long)]
+    pub step: bool,
+}
+
+/// Arguments for `memora export`.
+#[derive(Debug, clap::Args)]
+pub struct ExportArgs {
+    /// Target format: `claude-code`, `cursor`, `cline`, `openai-assistant`, `json`.
+    #[arg(long = "to", value_name = "FORMAT")]
+    pub to: String,
+
+    /// Write to this file instead of stdout. When absent, the format's
+    /// conventional filename is used (e.g. `CLAUDE.md`).
+    #[arg(long, short = 'o', value_name = "PATH")]
+    pub output: Option<std::path::PathBuf>,
+
+    /// Print to stdout instead of writing a file.
+    #[arg(long)]
+    pub stdout: bool,
+
+    /// Keep at most N nodes (after ranking by importance).
+    #[arg(long, value_name = "N")]
+    pub top: Option<usize>,
+
+    /// Restrict to one memory kind. Repeatable.
+    #[arg(long = "kind", value_name = "KIND")]
+    pub kinds: Vec<String>,
+
+    /// Restrict to one status. Repeatable. Default behaviour drops
+    /// `deprecated`.
+    #[arg(long = "status", value_name = "STATUS")]
+    pub statuses: Vec<String>,
+
+    /// Drop nodes whose confidence is below this threshold.
+    #[arg(long, value_name = "T")]
+    pub min_confidence: Option<f32>,
 }

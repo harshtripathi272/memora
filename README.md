@@ -113,9 +113,12 @@ Ephemeral ──promote──▶ Stable ──gc──▶ Deprecated
 | `memora promote --id <NODE> \| --type <KIND> \| --all-confirmed [T]` | Promote ephemeral nodes to stable. |
 | `memora diff [FROM] [TO] [--working] [--semantic]` | Show belief changes between two revisions.        |
 | `memora merge BRANCH [--strategy auto\|ours\|theirs] [--no-ff] [--no-commit] [--dry-run]` | Three-way merge another branch into HEAD. |
+| `memora session start \| end \| current \| list` | Bracket a tool's run so events are recorded for replay. |
+| `memora replay [--session ID] [--step]`   | Walk through a recorded session's event stream.          |
+| `memora export --to <FORMAT> [...]`       | Render the working set to `claude-code`, `cursor`, `cline`, `openai-assistant`, or `json`. |
 
-Future phases add `replay`, `export`, `import`, `gc`, `push`, `pull`. See
-`SPEC.md` for the full roadmap.
+Future phases add `import`, `gc`, `push`, `pull`. See `SPEC.md` for the
+full roadmap.
 
 ---
 

@@ -151,6 +151,31 @@ keeps working. Any additional parents live in `merge_parents`, ordered by
 `sequence`. The full parent set of a commit is therefore
 `{commits.parent_id} ∪ {merge_parents.parent_id WHERE commit_id = …}`.
 
+### Session marker
+
+`.memora/sessions/CURRENT` is a single-line plain text file that, when
+present and non-empty, names the active recording session. While it
+exists, every `add_node`, `commit`, `promote`, and `merge` operation
+appends a row to `session_events` (kind `node_added`, `commit_created`,
+`node_promoted`, or `merge_completed`) keyed by the active id. A session
+without an active marker is closed; replay reads its rows in append
+order.
+
+### `session_events.event_type` canonical values
+
+| Value              | When                                       |
+| ------------------ | ------------------------------------------ |
+| `session_started`  | First event of every session.              |
+| `session_ended`    | Last event when the session is closed.     |
+| `node_added`       | A new node was added via `Repository::add_node`. |
+| `node_promoted`    | One or more nodes promoted (ephemeral → stable). |
+| `commit_created`   | A commit (regular or merge) was recorded.  |
+| `merge_completed`  | `Repository::merge` returned an outcome.   |
+
+`data_json` carries free-form JSON whose shape is documented in
+`crates/memora-core/src/repo.rs`. Tools should ignore unknown keys for
+forward compatibility.
+
 `PRAGMA foreign_keys = ON` and `PRAGMA journal_mode = WAL` are required for
 correctness and concurrency.
 
