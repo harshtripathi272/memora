@@ -1,0 +1,26 @@
+# Rust build artefacts
+/target
+**/target
+Cargo.lock.bak
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local memora stores created during dev / testing
+**/.memora/
+
+# Logs
+*.log
+
+# Test artefacts
+tmp/
+.tmp/
+*.tmp
