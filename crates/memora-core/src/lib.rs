@@ -29,21 +29,27 @@
 #![warn(missing_docs)]
 
 pub mod commit;
+pub mod config;
 pub mod error;
 pub mod export;
+pub mod gc;
 pub mod hash;
 pub mod merge;
 pub mod node;
+pub mod remote;
 pub mod repo;
 pub mod session;
 pub mod store;
 pub mod time;
 
 pub use commit::{CommitStats, MemoryCommit};
+pub use config::{Config, RemoteConfig};
 pub use error::{MemoraError, Result};
 pub use export::{render as render_export, ExportFormat};
+pub use gc::{GcAction, GcOptions, GcReport};
 pub use merge::{MergeEntry, MergePlan, MergeStrategy, NodeDecision};
 pub use node::{MemoryKind, MemoryNode, MemorySource, MemoryStatus};
+pub use remote::{SyncDirection, SyncOutcome};
 pub use repo::{
     DiffReport, ExportFilter, ImportanceWeights, MergeKind, MergeOptions, MergeOutcome,
     ModifiedNode, NodeChange, PromotePlan, Repository,

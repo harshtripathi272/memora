@@ -59,6 +59,19 @@ impl Refs {
         Ok(())
     }
 
+    /// Validate a remote name — same rules as branch names but no `/`
+    /// (so we can use it as a single directory segment under
+    /// `refs/remotes/`).
+    pub fn validate_remote_name(name: &str) -> Result<()> {
+        Self::validate_branch_name(name)?;
+        if name.contains('/') {
+            return Err(MemoraError::InvalidBranchName(format!(
+                "remote name must not contain '/': {name}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Initialise the on-disk ref structure. Idempotent.
     pub fn init(&self, default_branch: &str) -> Result<()> {
         Self::validate_branch_name(default_branch)?;
@@ -127,6 +140,52 @@ impl Refs {
         } else {
             Ok(Some(trimmed.to_string()))
         }
+    }
+
+    /// Path to a remote-tracking ref, e.g. `.memora/refs/remotes/origin/main`.
+    pub fn remote_ref_path(&self, remote: &str, branch: &str) -> PathBuf {
+        self.root
+            .join("refs")
+            .join("remotes")
+            .join(remote)
+            .join(branch)
+    }
+
+    /// Write a remote-tracking ref.
+    pub fn write_remote_ref(&self, remote: &str, branch: &str, commit_id: &str) -> Result<()> {
+        Self::validate_branch_name(branch)?;
+        let path = self.remote_ref_path(remote, branch);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, format!("{commit_id}\n"))?;
+        Ok(())
+    }
+
+    /// Read a remote-tracking ref. Returns `Err(RefNotFound)` if missing.
+    pub fn read_remote_ref(&self, remote: &str, branch: &str) -> Result<String> {
+        let path = self.remote_ref_path(remote, branch);
+        if !path.exists() {
+            return Err(MemoraError::RefNotFound(format!(
+                "{remote}/{branch}"
+            )));
+        }
+        let raw = fs::read_to_string(path)?;
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            Err(MemoraError::RefNotFound(format!("{remote}/{branch}")))
+        } else {
+            Ok(trimmed)
+        }
+    }
+
+    /// Delete every remote-tracking ref for `remote`.
+    pub fn remove_remote_refs(&self, remote: &str) -> Result<()> {
+        let dir = self.root.join("refs").join("remotes").join(remote);
+        if dir.exists() {
+            fs::remove_dir_all(dir)?;
+        }
+        Ok(())
     }
 
     /// Update a branch ref to point at the given commit id.

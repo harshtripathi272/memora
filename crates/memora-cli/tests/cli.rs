@@ -540,3 +540,140 @@ fn export_json_to_stdout() {
     assert!(parsed.is_array());
     assert_eq!(parsed.as_array().unwrap().len(), 1);
 }
+
+
+#[test]
+fn gc_marks_then_sweeps() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path();
+    memora().arg("init").current_dir(path).assert().success();
+    memora()
+        .args([
+            "add",
+            "--type",
+            "assumption",
+            "--content",
+            "weak guess",
+            "--source",
+            "model-inference",
+            "--confidence",
+            "0.05",
+        ])
+        .current_dir(path)
+        .assert()
+        .success();
+    // dry run does not mutate.
+    memora()
+        .args(["gc", "--threshold", "0.5", "--dry-run"])
+        .current_dir(path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dry run"));
+    // first pass marks.
+    memora()
+        .args(["gc", "--threshold", "0.5"])
+        .current_dir(path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 marked"));
+    // second pass sweeps.
+    memora()
+        .args(["gc", "--threshold", "0.5"])
+        .current_dir(path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 swept"));
+}
+
+#[test]
+fn remote_add_list_remove_round_trip() {
+    let project = tempdir().unwrap();
+    let remote_dir = tempdir().unwrap();
+    memora()
+        .arg("init")
+        .current_dir(project.path())
+        .assert()
+        .success();
+    memora()
+        .arg("init")
+        .current_dir(remote_dir.path())
+        .assert()
+        .success();
+
+    memora()
+        .args([
+            "remote",
+            "add",
+            "origin",
+            remote_dir.path().to_str().unwrap(),
+        ])
+        .current_dir(project.path())
+        .assert()
+        .success();
+    memora()
+        .args(["remote", "list"])
+        .current_dir(project.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("origin"));
+    memora()
+        .args(["remote", "remove", "origin"])
+        .current_dir(project.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed"));
+}
+
+#[test]
+fn push_then_pull_round_trip_via_cli() {
+    let local = tempdir().unwrap();
+    let remote = tempdir().unwrap();
+    memora().arg("init").current_dir(local.path()).assert().success();
+    memora().arg("init").current_dir(remote.path()).assert().success();
+
+    memora()
+        .args([
+            "add", "--type", "project", "--content", "rust workspace", "--source", "code-read",
+        ])
+        .current_dir(local.path())
+        .assert()
+        .success();
+    memora()
+        .args(["commit", "-m", "first"])
+        .current_dir(local.path())
+        .assert()
+        .success();
+    memora()
+        .args(["remote", "add", "origin", remote.path().to_str().unwrap()])
+        .current_dir(local.path())
+        .assert()
+        .success();
+    memora()
+        .args(["push", "origin"])
+        .current_dir(local.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Pushed"));
+
+    // Now from a third repo, point at the remote and pull.
+    let third = tempdir().unwrap();
+    memora().arg("init").current_dir(third.path()).assert().success();
+    memora()
+        .args(["remote", "add", "origin", remote.path().to_str().unwrap()])
+        .current_dir(third.path())
+        .assert()
+        .success();
+    memora()
+        .args(["pull", "origin"])
+        .current_dir(third.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Pulled"));
+    // Merge the remote tip into the (empty) local branch — fast-forward.
+    memora()
+        .args(["merge", "origin/main"])
+        .current_dir(third.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Fast-forwarded").or(predicate::str::contains("Merged")));
+}

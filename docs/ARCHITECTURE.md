@@ -120,6 +120,32 @@ raw JSON. The repository pre-ranks nodes using the importance formula
 `ImportanceWeights`) and applies an `ExportFilter` (kinds, statuses,
 min confidence, top N) before handing the nodes to the renderer.
 
+### `gc.rs` and remote sync (`remote.rs`, `config.rs`)
+
+`gc.rs` implements two-phase importance-scored garbage collection:
+the first pass marks low-importance nodes as `Deprecated`, the next
+pass physically deletes anything currently `Deprecated` from the live
+table. `node_versions` is never touched, so historical commits continue
+to carry the full snapshot of every GC'd node — restoring is just a
+`memora rollback` away. `--aggressive` collapses the two passes into one.
+
+`remote.rs` treats a remote as another `.memora/`-bearing project on
+the filesystem. `Repository::push` and `pull` open the remote's SQLite
+alongside ours and copy the missing commits in topological order along
+with their companion rows (`commit_nodes`, `node_versions`,
+`merge_parents`). Pushes are fast-forward-only: if the remote tip is
+not an ancestor of ours, the push is rejected so we never overwrite
+remote history. After `pull`, the remote tip is recorded at
+`refs/remotes/<remote>/<branch>`, and `resolve_revision("origin/main")`
+folds it back into the rest of the system, so `memora merge origin/main`
+just works. The single `copy_commits_between` function is the entire
+transport boundary — replacing it with a real network protocol later
+keeps the public API unchanged.
+
+`config.rs` swaps the hand-written init-time TOML for a typed round-trip
+(`Config { core, author, remote }`) so adding and removing remotes
+produces a tidy, predictable diff against the on-disk file.
+
 ## Crate: `memora-cli`
 
 ### `cli.rs`
@@ -149,13 +175,21 @@ Centralised printing helpers (timestamps, short ids, error formatter).
 
 ## What's not built yet
 
-The roadmap in `README.md` calls out Phase 5. Notable gaps:
+The v0.1 surface is complete. Items the original spec keeps as future
+work:
 
-- `memora import` (round-trip from `CLAUDE.md` / `.cursorrules` files).
-- GC + remote sync (`memora gc`, `memora push`, `memora pull`).
-- Semantic-overlap detection during merge (different ids, same fact).
+- `memora import` — read existing `CLAUDE.md` / `.cursorrules` files back
+  into a memora store. JSON round-trip already works (`memora export
+  --to json` is consumable by any deserialiser).
+- Real network transport for `push` / `pull`. Today's transport is
+  filesystem-only; the row-level `copy_commits_between` boundary is
+  intentionally narrow so a future Git-protocol or HTTP transport plugs
+  in without changing the public API.
+- Semantic-overlap detection during merge. Same-id three-way merge is
+  in; "different ids, same fact" needs embeddings.
+- Embedded ONNX inference for the semantic diff engine.
 
 The internal types and SQLite tables already make room for these (see
 `sessions` / `session_events`, the per-commit `node_versions` snapshot
 table, `merge_parents`); we'll layer the workflows on top in subsequent
-commits.
+versions.
