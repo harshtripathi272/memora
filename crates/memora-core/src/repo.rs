@@ -8,10 +8,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use uuid::Uuid;
+
 use crate::commit::{commit_id_with_parents, tree_id_for_nodes, CommitStats, MemoryCommit};
 use crate::error::{MemoraError, Result};
+use crate::export::{render as render_export, ExportFormat};
 use crate::merge::{plan_merge, MergePlan, MergeStrategy, NodeDecision};
 use crate::node::{MemoryKind, MemoryNode, MemoryStatus, NewNode};
+use crate::session::{Session, SessionEvent, SessionEventKind};
 use crate::store::{HeadRef, Refs, Store, UnstagedSummary};
 use crate::time::{Clock, SystemClock};
 use crate::{DEFAULT_BRANCH, FORMAT_VERSION, STORE_DIR};
@@ -166,6 +170,17 @@ impl Repository {
         let now = self.clock.now();
         let node = MemoryNode::from_new(req, now);
         self.store.upsert_node(&node)?;
+        self.record_event(
+            SessionEventKind::NodeAdded,
+            serde_json::json!({
+                "node_id": node.id,
+                "kind": node.kind.as_str(),
+                "status": node.status.as_str(),
+                "source": node.source.as_str(),
+                "confidence": node.confidence,
+                "content": node.content,
+            }),
+        )?;
         Ok(node)
     }
 
@@ -291,10 +306,23 @@ impl Repository {
             }
         }
 
-        Ok(CommitOutcome {
-            commit: Some(commit),
+        let outcome = CommitOutcome {
+            commit: Some(commit.clone()),
             branch: branch_name,
-        })
+        };
+        self.record_event(
+            SessionEventKind::CommitCreated,
+            serde_json::json!({
+                "commit_id": commit.id,
+                "parent": commit.parent,
+                "extra_parents": extra_parents,
+                "branch": outcome.branch,
+                "message": commit.message,
+                "tree_id": commit.tree_id,
+                "stats": commit.stats,
+            }),
+        )?;
+        Ok(outcome)
     }
 
     /// Walk the commit history starting from HEAD.
@@ -471,11 +499,29 @@ impl Repository {
         } else {
             MergeKind::Merged
         };
-        Ok(MergeOutcome {
+        let result = MergeOutcome {
             kind,
             plan,
             commit: outcome.commit,
-        })
+        };
+        self.record_event(
+            SessionEventKind::MergeCompleted,
+            serde_json::json!({
+                "ours": result.plan.ours,
+                "theirs": result.plan.theirs,
+                "base": result.plan.base,
+                "kind": match result.kind {
+                    MergeKind::AlreadyUpToDate => "already_up_to_date",
+                    MergeKind::FastForward => "fast_forward",
+                    MergeKind::Merged => "merged",
+                    MergeKind::Conflicts => "conflicts",
+                    MergeKind::NoCommit => "no_commit",
+                },
+                "commit_id": result.commit.as_ref().map(|c| c.id.clone()),
+                "conflicts": result.plan.conflicts().len(),
+            }),
+        )?;
+        Ok(result)
     }
 
     /// Replace the live `nodes` table with the contents of `target`.
@@ -543,6 +589,16 @@ impl Repository {
         let now = self.clock.now();
         for id in &candidate_ids {
             self.store.set_status(id, MemoryStatus::Stable, now)?;
+        }
+        if !candidate_ids.is_empty() {
+            self.record_event(
+                SessionEventKind::NodePromoted,
+                serde_json::json!({
+                    "node_ids": candidate_ids,
+                    "from": "ephemeral",
+                    "to": "stable",
+                }),
+            )?;
         }
         Ok(candidate_ids)
     }
@@ -630,6 +686,163 @@ impl Repository {
         }
         Ok(current)
     }
+
+    // --- session bracketing ---------------------------------------------
+
+    /// Path to the marker file recording the active session id, if any.
+    fn current_session_path(&self) -> PathBuf {
+        self.memora_dir.join("sessions").join("CURRENT")
+    }
+
+    /// Read the active session id (the contents of `.memora/sessions/CURRENT`).
+    pub fn current_session_id(&self) -> Result<Option<String>> {
+        let path = self.current_session_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = fs::read_to_string(&path)?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(trimmed.to_string()))
+        }
+    }
+
+    /// Start a fresh recording session. Sets the `CURRENT` marker so that
+    /// subsequent operations append events to it. Returns the new session.
+    pub fn start_session(&self, source: &str) -> Result<Session> {
+        if let Some(existing) = self.current_session_id()? {
+            return Err(MemoraError::Invalid(format!(
+                "a session is already active: {existing}; run `memora session end` first"
+            )));
+        }
+        let now = self.clock.now();
+        let session = Session {
+            id: Uuid::new_v4().to_string(),
+            source: source.to_string(),
+            started_at: now,
+            ended_at: None,
+            event_count: 0,
+        };
+        self.store.insert_session(&session)?;
+        // Make sure `.memora/sessions/` exists; init does this but a hand-
+        // crafted store might not.
+        fs::create_dir_all(self.memora_dir.join("sessions"))?;
+        fs::write(self.current_session_path(), &session.id)?;
+        // Record the start event itself.
+        self.store.append_session_event(
+            &session.id,
+            now,
+            SessionEventKind::SessionStarted,
+            &serde_json::json!({ "source": source }),
+        )?;
+        Ok(session)
+    }
+
+    /// End the active session. Returns the closed session, or `None` if
+    /// none was active.
+    pub fn end_session(&self) -> Result<Option<Session>> {
+        let id = match self.current_session_id()? {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        let now = self.clock.now();
+        self.store.append_session_event(
+            &id,
+            now,
+            SessionEventKind::SessionEnded,
+            &serde_json::json!({}),
+        )?;
+        let mut session = self
+            .store
+            .get_session(&id)?
+            .ok_or_else(|| MemoraError::Invalid(format!("session not found: {id}")))?;
+        session.ended_at = Some(now);
+        // event_count was incremented inside append_session_event.
+        if let Some(updated) = self.store.get_session(&id)? {
+            session.event_count = updated.event_count;
+        }
+        self.store.update_session(&session)?;
+        let _ = fs::remove_file(self.current_session_path());
+        Ok(Some(session))
+    }
+
+    /// Record an arbitrary event against the active session, if any. No-op
+    /// when no session is active.
+    pub fn record_event(&self, kind: SessionEventKind, data: serde_json::Value) -> Result<()> {
+        let id = match self.current_session_id()? {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+        let now = self.clock.now();
+        self.store.append_session_event(&id, now, kind, &data)?;
+        Ok(())
+    }
+
+    /// Read every event from a session, in append order.
+    pub fn session_events(&self, session_id: &str) -> Result<Vec<SessionEvent>> {
+        let resolved = self.store.resolve_session_prefix(session_id)?;
+        self.store.session_events(&resolved)
+    }
+
+    /// List sessions, newest first.
+    pub fn list_sessions(&self, limit: Option<usize>) -> Result<Vec<Session>> {
+        self.store.list_sessions(limit)
+    }
+
+    // --- export ---------------------------------------------------------
+
+    /// Score every node in the working set with the standard importance
+    /// formula and return them sorted by score (highest first). Used by
+    /// [`Self::export`].
+    pub fn ranked_nodes(&self, weights: ImportanceWeights) -> Result<Vec<(MemoryNode, f32)>> {
+        let nodes = self.store.all_nodes()?;
+        let now = self.clock.now();
+        let max_age = nodes
+            .iter()
+            .map(|n| (now - n.last_accessed).max(1))
+            .max()
+            .unwrap_or(1);
+        let max_count = nodes.iter().map(|n| n.access_count).max().unwrap_or(0);
+
+        let mut scored: Vec<(MemoryNode, f32)> = nodes
+            .into_iter()
+            .map(|n| {
+                let recency = if max_age > 0 {
+                    1.0 - ((now - n.last_accessed).max(0) as f32 / max_age as f32)
+                } else {
+                    1.0
+                };
+                let access = if max_count == 0 {
+                    0.0
+                } else {
+                    n.access_count as f32 / max_count as f32
+                };
+                let score = (n.confidence * weights.confidence)
+                    + (recency * weights.recency)
+                    + (access * weights.access);
+                (n, score)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(scored)
+    }
+
+    /// Render the working set into the requested export format. The
+    /// optional [`ExportFilter`] caps and filters the candidate set first.
+    pub fn export(&self, format: ExportFormat, filter: ExportFilter) -> Result<String> {
+        let scored = self.ranked_nodes(filter.weights)?;
+        let mut nodes: Vec<MemoryNode> = scored
+            .into_iter()
+            .map(|(n, _)| n)
+            .filter(|n| filter.matches(n))
+            .collect();
+        if let Some(top) = filter.top {
+            nodes.truncate(top);
+        }
+        Ok(render_export(format, &nodes))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -693,6 +906,69 @@ pub struct MergeOutcome {
 
 fn short_for_display(id: &str) -> String {
     id.chars().take(7).collect()
+}
+
+/// Weights for the importance score used by [`Repository::ranked_nodes`].
+/// They should sum to 1.0 for a normalised score, but no validation is
+/// performed.
+#[derive(Debug, Clone, Copy)]
+pub struct ImportanceWeights {
+    /// Weight of `confidence` (0.0 – 1.0).
+    pub confidence: f32,
+    /// Weight of recency (0.0 – 1.0, freshest = 1.0).
+    pub recency: f32,
+    /// Weight of access frequency (0.0 – 1.0, hottest = 1.0).
+    pub access: f32,
+}
+
+impl Default for ImportanceWeights {
+    fn default() -> Self {
+        // Matches the formula in `docs/MEMORY_TYPES.md`.
+        Self {
+            confidence: 0.4,
+            recency: 0.3,
+            access: 0.3,
+        }
+    }
+}
+
+/// Filter / cap applied to the working set before [`Repository::export`]
+/// renders it.
+#[derive(Debug, Clone, Default)]
+pub struct ExportFilter {
+    /// Importance score weights.
+    pub weights: ImportanceWeights,
+    /// Keep at most this many nodes after ranking.
+    pub top: Option<usize>,
+    /// Restrict to specific kinds. Empty means "all kinds".
+    pub kinds: Vec<MemoryKind>,
+    /// Restrict to specific statuses. Empty means "all statuses except
+    /// deprecated".
+    pub statuses: Vec<MemoryStatus>,
+    /// Drop nodes with confidence below this threshold.
+    pub min_confidence: Option<f32>,
+}
+
+impl ExportFilter {
+    /// Decide whether a single node passes the filter.
+    pub fn matches(&self, node: &MemoryNode) -> bool {
+        if !self.kinds.is_empty() && !self.kinds.contains(&node.kind) {
+            return false;
+        }
+        if self.statuses.is_empty() {
+            if node.status == MemoryStatus::Deprecated {
+                return false;
+            }
+        } else if !self.statuses.contains(&node.status) {
+            return false;
+        }
+        if let Some(min) = self.min_confidence {
+            if node.confidence < min {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// Caller intent for [`Repository::promote`].
@@ -1390,5 +1666,211 @@ mod tests {
         assert!(outcome.plan.has_conflicts());
         let merged = repo.store().get_node(&base_node.id).unwrap().unwrap();
         assert_eq!(merged.status, MemoryStatus::Conflicted);
+    }
+}
+
+
+#[cfg(test)]
+mod phase4_tests {
+    use super::*;
+    use crate::node::{MemoryKind, MemorySource, NewNode};
+    use std::path::Path;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use tempfile::tempdir;
+
+    struct StepClock(AtomicI64);
+    impl Clock for StepClock {
+        fn now(&self) -> i64 {
+            self.0.fetch_add(1, Ordering::SeqCst)
+        }
+    }
+
+    fn new_repo(path: &Path) -> Repository {
+        Repository::init(path)
+            .unwrap()
+            .with_clock(Box::new(StepClock(AtomicI64::new(2_000))))
+    }
+
+    #[test]
+    fn session_records_add_and_commit_events() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path());
+        let session = repo.start_session("claude_code").unwrap();
+
+        repo.add_node(NewNode::new(
+            MemoryKind::Project,
+            "uses Rust",
+            MemorySource::CodeRead,
+        ))
+        .unwrap();
+        repo.commit("first", "human").unwrap();
+
+        let ended = repo.end_session().unwrap().expect("session was active");
+        let events = repo.session_events(&session.id).unwrap();
+        // Expect: started, node_added, commit_created, ended.
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0].kind, SessionEventKind::SessionStarted);
+        assert_eq!(events[1].kind, SessionEventKind::NodeAdded);
+        assert_eq!(events[2].kind, SessionEventKind::CommitCreated);
+        assert_eq!(events[3].kind, SessionEventKind::SessionEnded);
+        assert_eq!(ended.event_count, 4);
+        // After end_session, CURRENT marker is gone.
+        assert!(repo.current_session_id().unwrap().is_none());
+    }
+
+    #[test]
+    fn cannot_start_two_sessions() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path());
+        let _s = repo.start_session("manual").unwrap();
+        let again = repo.start_session("manual");
+        assert!(again.is_err());
+    }
+
+    #[test]
+    fn record_event_is_noop_when_no_session() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path());
+        // Adding a node without a session should still succeed and not blow up.
+        repo.add_node(NewNode::new(
+            MemoryKind::Project,
+            "no session",
+            MemorySource::CodeRead,
+        ))
+        .unwrap();
+        let sessions = repo.list_sessions(None).unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn promote_emits_promotion_event() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path());
+        let n = repo
+            .add_node(NewNode::new(
+                MemoryKind::Assumption,
+                "redis",
+                MemorySource::ModelInference,
+            ))
+            .unwrap();
+        let session = repo.start_session("claude_code").unwrap();
+        repo.promote(PromotePlan::Ids(vec![n.id.clone()])).unwrap();
+        repo.end_session().unwrap();
+        let events = repo.session_events(&session.id).unwrap();
+        assert!(events
+            .iter()
+            .any(|e| e.kind == SessionEventKind::NodePromoted));
+    }
+
+    #[test]
+    fn export_json_round_trip() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path());
+        repo.add_node(NewNode::new(
+            MemoryKind::Project,
+            "uses Rust",
+            MemorySource::CodeRead,
+        ))
+        .unwrap();
+        repo.add_node(NewNode {
+            confidence: Some(0.4),
+            ..NewNode::new(
+                MemoryKind::Assumption,
+                "redis is the cache",
+                MemorySource::ModelInference,
+            )
+        })
+        .unwrap();
+        let body = repo
+            .export(ExportFormat::Json, ExportFilter::default())
+            .unwrap();
+        let parsed: Vec<MemoryNode> = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn export_filters_drop_below_threshold_and_deprecated() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path());
+        let _high = repo
+            .add_node(NewNode::new(
+                MemoryKind::Project,
+                "high",
+                MemorySource::CodeRead,
+            ))
+            .unwrap();
+        let _low = repo
+            .add_node(NewNode {
+                confidence: Some(0.2),
+                ..NewNode::new(
+                    MemoryKind::Assumption,
+                    "low",
+                    MemorySource::ModelInference,
+                )
+            })
+            .unwrap();
+        let body = repo
+            .export(
+                ExportFormat::Json,
+                ExportFilter {
+                    min_confidence: Some(0.5),
+                    ..ExportFilter::default()
+                },
+            )
+            .unwrap();
+        let parsed: Vec<MemoryNode> = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].content, "high");
+    }
+
+    #[test]
+    fn export_claude_code_groups_by_kind() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path());
+        repo.add_node(NewNode::new(
+            MemoryKind::Semantic,
+            "auth uses jwt",
+            MemorySource::CodeRead,
+        ))
+        .unwrap();
+        repo.add_node(NewNode::new(
+            MemoryKind::Project,
+            "rust workspace",
+            MemorySource::CodeRead,
+        ))
+        .unwrap();
+        let body = repo
+            .export(ExportFormat::ClaudeCode, ExportFilter::default())
+            .unwrap();
+        assert!(body.contains("# Project memory"));
+        assert!(body.contains("## Project"));
+        assert!(body.contains("## Semantic"));
+        assert!(body.contains("auth uses jwt"));
+        assert!(body.contains("rust workspace"));
+    }
+
+    #[test]
+    fn export_top_caps_results_after_ranking() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path());
+        for i in 0..5 {
+            repo.add_node(NewNode::new(
+                MemoryKind::Project,
+                format!("entry-{i}"),
+                MemorySource::CodeRead,
+            ))
+            .unwrap();
+        }
+        let body = repo
+            .export(
+                ExportFormat::Json,
+                ExportFilter {
+                    top: Some(2),
+                    ..ExportFilter::default()
+                },
+            )
+            .unwrap();
+        let parsed: Vec<MemoryNode> = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed.len(), 2);
     }
 }

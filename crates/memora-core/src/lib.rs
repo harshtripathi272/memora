@@ -30,21 +30,25 @@
 
 pub mod commit;
 pub mod error;
+pub mod export;
 pub mod hash;
 pub mod merge;
 pub mod node;
 pub mod repo;
+pub mod session;
 pub mod store;
 pub mod time;
 
 pub use commit::{CommitStats, MemoryCommit};
 pub use error::{MemoraError, Result};
+pub use export::{render as render_export, ExportFormat};
 pub use merge::{MergeEntry, MergePlan, MergeStrategy, NodeDecision};
 pub use node::{MemoryKind, MemoryNode, MemorySource, MemoryStatus};
 pub use repo::{
-    DiffReport, MergeKind, MergeOptions, MergeOutcome, ModifiedNode, NodeChange, PromotePlan,
-    Repository,
+    DiffReport, ExportFilter, ImportanceWeights, MergeKind, MergeOptions, MergeOutcome,
+    ModifiedNode, NodeChange, PromotePlan, Repository,
 };
+pub use session::{Session, SessionEvent, SessionEventKind};
 
 /// On-disk format version written into `.memora/config`. Bumped whenever the
 /// schema or directory layout changes in a non backwards-compatible way.

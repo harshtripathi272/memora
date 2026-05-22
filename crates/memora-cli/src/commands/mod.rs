@@ -12,11 +12,14 @@ mod add;
 mod branch;
 mod commit;
 mod diff;
+mod export;
 mod init;
 mod log;
 mod merge;
 mod promote;
+mod replay;
 mod rollback;
+mod session;
 mod status;
 mod switch;
 
@@ -34,5 +37,8 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Promote(args) => promote::run(args),
         Command::Diff(args) => diff::run(args),
         Command::Merge(args) => merge::run(args),
+        Command::Session(args) => session::run(args),
+        Command::Replay(args) => replay::run(args),
+        Command::Export(args) => export::run(args),
     }
 }

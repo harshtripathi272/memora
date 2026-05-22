@@ -412,3 +412,131 @@ fn merge_already_up_to_date_via_cli() {
         .success()
         .stdout(predicate::str::contains("Already up to date"));
 }
+
+
+#[test]
+fn session_lifecycle_via_cli() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path();
+    memora().arg("init").current_dir(path).assert().success();
+
+    memora()
+        .args(["session", "start", "--source", "claude_code"])
+        .current_dir(path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Started session"));
+    memora()
+        .args(["add", "--type", "project", "--content", "uses Rust", "--source", "code-read"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["commit", "-m", "first"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["session", "end"])
+        .current_dir(path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Ended session"));
+
+    // list shows the session, replay walks events.
+    memora()
+        .args(["session", "list"])
+        .current_dir(path)
+        .assert()
+        .success();
+}
+
+#[test]
+fn replay_streams_events() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path();
+    memora().arg("init").current_dir(path).assert().success();
+    memora()
+        .args(["session", "start", "--source", "manual"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["add", "--type", "project", "--content", "x", "--source", "code-read"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["commit", "-m", "c"])
+        .current_dir(path)
+        .assert()
+        .success();
+    // Replay before ending the session — should still show the events so far.
+    memora()
+        .args(["replay"])
+        .current_dir(path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("session_started"))
+        .stdout(predicate::str::contains("node_added"))
+        .stdout(predicate::str::contains("commit_created"));
+}
+
+#[test]
+fn export_claude_code_writes_file() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path();
+    memora().arg("init").current_dir(path).assert().success();
+    memora()
+        .args([
+            "add",
+            "--type",
+            "semantic",
+            "--content",
+            "auth uses jwt rs256",
+            "--source",
+            "code-read",
+        ])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["commit", "-m", "first"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["export", "--to", "claude-code"])
+        .current_dir(path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Exported"));
+    let body = std::fs::read_to_string(path.join("CLAUDE.md")).unwrap();
+    assert!(body.contains("auth uses jwt rs256"));
+    assert!(body.contains("## Semantic"));
+}
+
+#[test]
+fn export_json_to_stdout() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path();
+    memora().arg("init").current_dir(path).assert().success();
+    memora()
+        .args(["add", "--type", "project", "--content", "rust", "--source", "code-read"])
+        .current_dir(path)
+        .assert()
+        .success();
+    let out = memora()
+        .args(["export", "--to", "json", "--stdout"])
+        .current_dir(path)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let body = String::from_utf8(out).unwrap();
+    let cleaned = strip_ansi(&body);
+    let parsed: serde_json::Value = serde_json::from_str(cleaned.trim()).unwrap();
+    assert!(parsed.is_array());
+    assert_eq!(parsed.as_array().unwrap().len(), 1);
+}
