@@ -65,6 +65,18 @@ pub enum Command {
 
     /// Export the working set into another tool's format.
     Export(ExportArgs),
+
+    /// Run garbage collection on the working set.
+    Gc(GcArgs),
+
+    /// Manage configured remotes (`add`, `list`, `remove`).
+    Remote(RemoteArgs),
+
+    /// Push a branch to a configured remote.
+    Push(PushArgs),
+
+    /// Pull a branch from a configured remote.
+    Pull(PullArgs),
 }
 
 /// Arguments for `memora init`.
@@ -346,4 +358,64 @@ pub struct ExportArgs {
     /// Drop nodes whose confidence is below this threshold.
     #[arg(long, value_name = "T")]
     pub min_confidence: Option<f32>,
+}
+
+/// Arguments for `memora gc`.
+#[derive(Debug, clap::Args)]
+pub struct GcArgs {
+    /// Importance threshold below which nodes are marked `Deprecated`.
+    #[arg(long, default_value_t = 0.3)]
+    pub threshold: f32,
+
+    /// Mark and sweep in one pass instead of two.
+    #[arg(long)]
+    pub aggressive: bool,
+
+    /// Show what would happen without mutating anything.
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
+}
+
+/// Arguments for `memora remote`.
+#[derive(Debug, clap::Args)]
+pub struct RemoteArgs {
+    #[command(subcommand)]
+    pub command: RemoteCommand,
+}
+
+/// `memora remote` subcommands.
+#[derive(Debug, clap::Subcommand)]
+pub enum RemoteCommand {
+    /// Add (or overwrite) a named remote pointing at a filesystem path.
+    Add {
+        /// Remote name, e.g. `origin`.
+        name: String,
+        /// Filesystem path to another `.memora/`-bearing project.
+        url: String,
+    },
+    /// List configured remotes.
+    List,
+    /// Remove a remote and its tracking refs.
+    Remove {
+        /// Remote name.
+        name: String,
+    },
+}
+
+/// Arguments for `memora push`.
+#[derive(Debug, clap::Args)]
+pub struct PushArgs {
+    /// Remote name.
+    pub remote: String,
+    /// Branch to push. Defaults to the current branch.
+    pub branch: Option<String>,
+}
+
+/// Arguments for `memora pull`.
+#[derive(Debug, clap::Args)]
+pub struct PullArgs {
+    /// Remote name.
+    pub remote: String,
+    /// Branch to pull. Defaults to the current branch.
+    pub branch: Option<String>,
 }

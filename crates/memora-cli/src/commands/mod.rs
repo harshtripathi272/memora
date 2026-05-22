@@ -13,10 +13,14 @@ mod branch;
 mod commit;
 mod diff;
 mod export;
+mod gc;
 mod init;
 mod log;
 mod merge;
 mod promote;
+mod pull;
+mod push;
+mod remote;
 mod replay;
 mod rollback;
 mod session;
@@ -40,5 +44,9 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Session(args) => session::run(args),
         Command::Replay(args) => replay::run(args),
         Command::Export(args) => export::run(args),
+        Command::Gc(args) => gc::run(args),
+        Command::Remote(args) => remote::run(args),
+        Command::Push(args) => push::run(args),
+        Command::Pull(args) => pull::run(args),
     }
 }

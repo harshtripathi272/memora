@@ -116,9 +116,13 @@ Ephemeral ──promote──▶ Stable ──gc──▶ Deprecated
 | `memora session start \| end \| current \| list` | Bracket a tool's run so events are recorded for replay. |
 | `memora replay [--session ID] [--step]`   | Walk through a recorded session's event stream.          |
 | `memora export --to <FORMAT> [...]`       | Render the working set to `claude-code`, `cursor`, `cline`, `openai-assistant`, or `json`. |
+| `memora gc [--threshold T] [--aggressive] [--dry-run]` | Two-phase importance-scored garbage collection.   |
+| `memora remote add NAME URL \| list \| remove NAME` | Manage filesystem remotes.                          |
+| `memora push REMOTE [BRANCH]`             | Push a branch to a configured remote (fast-forward only).|
+| `memora pull REMOTE [BRANCH]`             | Copy remote commits and update `refs/remotes/<remote>/<branch>`. |
 
-Future phases add `import`, `gc`, `push`, `pull`. See `SPEC.md` for the
-full roadmap.
+This is the full v0.1 surface. Future versions will add `import`,
+embeddings-driven semantic merge, and a real network transport.
 
 ---
 

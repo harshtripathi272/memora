@@ -23,12 +23,10 @@ Status: **format version 1 (pre-1.0, may change).**
 ├── memora.db             # SQLite database (the object store)
 ├── refs/
 │   ├── heads/            # one file per branch; contents = commit id
-│   └── remotes/          # remote-tracking refs (reserved, unused in v1)
+│   └── remotes/          # one dir per remote, with branch refs inside
 ├── objects/              # reserved for future content-addressed blobs
-└── sessions/             # reserved for future replay sessions
-    └── <session-id>/
-        ├── events.jsonl
-        └── snapshots/
+└── sessions/             # session events live in SQLite; this dir stores
+                          # only `CURRENT` (active session marker)
 ```
 
 ### `HEAD`
@@ -40,15 +38,24 @@ One line, no trailing whitespace required:
 
 ### `config`
 
-TOML. Minimum keys for v1:
+TOML. Round-tripped through `crate::config::Config` so adding /
+removing remotes produces a tidy diff. Minimum keys for v1:
 
 ```toml
+# memora config (format v1)
 [core]
 format_version = 1
 default_branch = "main"
 
 [author]
 name = "human"
+```
+
+Optional `[remote.<name>]` sections are added by `memora remote add`:
+
+```toml
+[remote.origin]
+url = "/abs/path/to/another/project"
 ```
 
 Tools may add their own sections (e.g. `[claude_code]`) without breaking
@@ -58,6 +65,13 @@ compatibility, as long as `[core]` keys remain valid.
 
 Either empty (a branch with no commits yet) or a single line containing the
 full commit sha256 the branch points at.
+
+### `refs/remotes/<remote>/<branch>`
+
+Same format as `refs/heads/<branch>`. Written by `memora pull` and
+`memora push` to record the most recently observed tip of a remote
+branch. Resolvable as `<remote>/<branch>` (e.g. `origin/main`) anywhere
+that takes a revision.
 
 ---
 

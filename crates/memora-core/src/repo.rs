@@ -11,14 +11,17 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::commit::{commit_id_with_parents, tree_id_for_nodes, CommitStats, MemoryCommit};
+use crate::config::{validate_remote_url, Config, RemoteConfig};
 use crate::error::{MemoraError, Result};
 use crate::export::{render as render_export, ExportFormat};
+use crate::gc::{run_gc, GcOptions, GcReport};
 use crate::merge::{plan_merge, MergePlan, MergeStrategy, NodeDecision};
 use crate::node::{MemoryKind, MemoryNode, MemoryStatus, NewNode};
+use crate::remote::{copy_commits_between, is_ancestor, open_remote, SyncDirection, SyncOutcome};
 use crate::session::{Session, SessionEvent, SessionEventKind};
 use crate::store::{HeadRef, Refs, Store, UnstagedSummary};
 use crate::time::{Clock, SystemClock};
-use crate::{DEFAULT_BRANCH, FORMAT_VERSION, STORE_DIR};
+use crate::{DEFAULT_BRANCH, STORE_DIR};
 
 /// A fully constructed repository, anchored at `<workdir>/.memora/`.
 pub struct Repository {
@@ -99,18 +102,11 @@ impl Repository {
         let refs = Refs::new(&memora_dir);
         refs.init(DEFAULT_BRANCH)?;
 
-        // Write a friendly config file. Pure TOML, hand-written so we
-        // don't pull a serialiser in just for this.
-        let config = format!(
-            "# memora config (format v{FORMAT_VERSION})\n\
-             [core]\n\
-             format_version = {FORMAT_VERSION}\n\
-             default_branch = \"{DEFAULT_BRANCH}\"\n\
-             \n\
-             [author]\n\
-             name = \"human\"\n"
-        );
-        fs::write(memora_dir.join("config"), config)?;
+        // Persist the default config through the structured round-trip so
+        // future `remote add` / `remote remove` operations produce a tidy
+        // diff against this baseline.
+        let config = Config::default();
+        config.save(&memora_dir)?;
 
         let store = Store::open(memora_dir.join("memora.db"))?;
         Ok(Self {
@@ -439,10 +435,57 @@ impl Repository {
         their_rev: &str,
         opts: MergeOptions,
     ) -> Result<MergeOutcome> {
-        let ours = self
-            .head_commit_id()?
-            .ok_or_else(|| MemoraError::CommitNotFound("HEAD".into()))?;
         let theirs = self.resolve_revision(their_rev)?;
+        let head_ref = self.refs.read_head()?;
+
+        // If HEAD has no commit yet (e.g. fresh `memora pull` into a
+        // brand-new repo), treat the merge as a fast-forward of the
+        // current branch onto `theirs`. This matches `git merge` /
+        // `git pull` behaviour for an empty branch.
+        let ours = match self.head_commit_id()? {
+            Some(id) => id,
+            None => {
+                if !opts.allow_fast_forward {
+                    return Err(MemoraError::Invalid(
+                        "HEAD has no commits yet; --no-ff cannot fast-forward an empty branch".into(),
+                    ));
+                }
+                let their_nodes = self.store.commit_node_versions(&theirs)?;
+                self.replace_working_set(&their_nodes)?;
+                match head_ref {
+                    HeadRef::Branch(name) => {
+                        if !self.refs.branch_path(&name).exists() {
+                            self.refs.create_branch(&name, Some(&theirs))?;
+                        } else {
+                            self.refs.write_branch(&name, &theirs)?;
+                        }
+                    }
+                    HeadRef::Detached(_) => self.refs.write_head_detached(&theirs)?,
+                }
+                let commit = self.store.get_commit(&theirs)?;
+                let plan = plan_merge(
+                    &self.store,
+                    &theirs,
+                    &theirs,
+                    opts.strategy,
+                )?;
+                let outcome = MergeOutcome {
+                    kind: MergeKind::FastForward,
+                    plan,
+                    commit,
+                };
+                self.record_event(
+                    SessionEventKind::MergeCompleted,
+                    serde_json::json!({
+                        "ours": null,
+                        "theirs": theirs,
+                        "kind": "fast_forward",
+                    }),
+                )?;
+                return Ok(outcome);
+            }
+        };
+
         let plan = plan_merge(&self.store, &ours, &theirs, opts.strategy)?;
 
         if plan.already_up_to_date {
@@ -631,6 +674,7 @@ impl Repository {
     /// Resolve a revision spec to a full commit id. Supported forms:
     /// - full or short commit id (>=4 hex chars)
     /// - branch name
+    /// - remote-tracking ref `<remote>/<branch>` (e.g. `origin/main`)
     /// - `HEAD`, `HEAD~`, `HEAD~N`
     pub fn resolve_revision(&self, rev: &str) -> Result<String> {
         let rev = rev.trim();
@@ -655,6 +699,14 @@ impl Repository {
         if rev.chars().all(|c| c.is_ascii_hexdigit()) && rev.len() >= 4 {
             if let Ok(id) = self.store.resolve_commit_prefix(rev) {
                 return Ok(id);
+            }
+        }
+
+        // <remote>/<branch> tracking ref?
+        if let Some((remote, branch)) = rev.split_once('/') {
+            let path = self.refs.remote_ref_path(remote, branch);
+            if path.exists() {
+                return self.refs.read_remote_ref(remote, branch);
             }
         }
 
@@ -842,6 +894,190 @@ impl Repository {
             nodes.truncate(top);
         }
         Ok(render_export(format, &nodes))
+    }
+
+    // --- garbage collection ---------------------------------------------
+
+    /// Run garbage collection on the live working set. See
+    /// [`crate::gc::run_gc`] for the algorithm.
+    pub fn gc(&self, opts: GcOptions) -> Result<GcReport> {
+        let now = self.clock.now();
+        run_gc(&self.store, now, opts)
+    }
+
+    // --- remotes ---------------------------------------------------------
+
+    /// Read the persisted config.
+    pub fn config(&self) -> Result<Config> {
+        Config::load(&self.memora_dir)
+    }
+
+    /// Persist a [`Config`] back to `.memora/config`.
+    pub fn save_config(&self, config: &Config) -> Result<()> {
+        config.save(&self.memora_dir)
+    }
+
+    /// Add (or overwrite) a remote and persist the config.
+    pub fn add_remote(&self, name: &str, url: &str) -> Result<RemoteConfig> {
+        Refs::validate_remote_name(name)?;
+        // Validate the URL points at something that exists. We accept
+        // either the project root or `<root>/.memora`.
+        let _ = validate_remote_url(url, &self.workdir)?;
+        let mut config = self.config()?;
+        config.set_remote(name, url);
+        self.save_config(&config)?;
+        Ok(config.remote.get(name).cloned().expect("remote we just added"))
+    }
+
+    /// List configured remotes.
+    pub fn list_remotes(&self) -> Result<Vec<(String, RemoteConfig)>> {
+        let config = self.config()?;
+        Ok(config.remote.into_iter().collect())
+    }
+
+    /// Remove a configured remote and any of its tracking refs.
+    pub fn remove_remote(&self, name: &str) -> Result<bool> {
+        let mut config = self.config()?;
+        let removed = config.remove_remote(name);
+        if removed {
+            self.save_config(&config)?;
+            self.refs.remove_remote_refs(name)?;
+        }
+        Ok(removed)
+    }
+
+    /// Look up a remote by name. Returns `Err(Invalid)` if it's not in
+    /// the config.
+    pub fn require_remote(&self, name: &str) -> Result<RemoteConfig> {
+        self.config()?
+            .remote
+            .get(name)
+            .cloned()
+            .ok_or_else(|| MemoraError::Invalid(format!("unknown remote '{name}'")))
+    }
+
+    /// Push the named local branch to a configured remote. The branch
+    /// must already point at a commit. The remote's branch is
+    /// fast-forward-only: if the remote tip is not an ancestor of ours,
+    /// we refuse rather than overwrite. The local repo records a
+    /// `refs/remotes/<remote>/<branch>` tracking ref on success.
+    pub fn push(&self, remote_name: &str, branch: &str) -> Result<SyncOutcome> {
+        let remote = self.require_remote(remote_name)?;
+        let our_tip = self.refs.read_branch(branch)?.ok_or_else(|| {
+            MemoraError::Invalid(format!("local branch '{branch}' has no commits to push"))
+        })?;
+
+        let (_remote_dir, remote_store, remote_refs) = open_remote(&remote.url)?;
+
+        // Fast-forward-only safety check.
+        let remote_tip = match remote_refs.branch_path(branch).exists() {
+            true => remote_refs.read_branch(branch)?,
+            false => None,
+        };
+        let mut rejected = false;
+        if let Some(rt) = remote_tip.as_deref() {
+            if rt == our_tip {
+                // Already-in-sync — the remote's tracking ref locally
+                // might still be stale, so update it before returning.
+                self.refs
+                    .write_remote_ref(remote_name, branch, &our_tip)?;
+                return Ok(SyncOutcome {
+                    direction: SyncDirection::Push,
+                    branch: branch.to_string(),
+                    commits_copied: 0,
+                    new_tip: Some(our_tip),
+                    already_synced: true,
+                    rejected_non_fast_forward: false,
+                });
+            }
+            // Reject if remote's tip is not reachable from ours.
+            if !is_ancestor(&self.store, rt, &our_tip)? {
+                rejected = true;
+            }
+        }
+        if rejected {
+            return Ok(SyncOutcome {
+                direction: SyncDirection::Push,
+                branch: branch.to_string(),
+                commits_copied: 0,
+                new_tip: remote_tip,
+                already_synced: false,
+                rejected_non_fast_forward: true,
+            });
+        }
+
+        let copied = copy_commits_between(&self.store, &remote_store, &our_tip)?;
+
+        // Ensure the remote has a branch ref directory (init may have
+        // already created it for the default branch only).
+        if !remote_refs.branch_path(branch).exists() {
+            remote_refs.create_branch(branch, Some(&our_tip))?;
+        } else {
+            remote_refs.write_branch(branch, &our_tip)?;
+        }
+        self.refs
+            .write_remote_ref(remote_name, branch, &our_tip)?;
+
+        Ok(SyncOutcome {
+            direction: SyncDirection::Push,
+            branch: branch.to_string(),
+            commits_copied: copied.len(),
+            new_tip: Some(our_tip),
+            already_synced: false,
+            rejected_non_fast_forward: false,
+        })
+    }
+
+    /// Pull a branch from a configured remote. Copies any missing
+    /// commits into our store and updates the remote-tracking ref.
+    /// Does NOT change the local branch ref or the working set —
+    /// downstream `memora merge <remote>/<branch>` does that.
+    pub fn pull(&self, remote_name: &str, branch: &str) -> Result<SyncOutcome> {
+        let remote = self.require_remote(remote_name)?;
+        let (_remote_dir, remote_store, remote_refs) = open_remote(&remote.url)?;
+        if !remote_refs.branch_path(branch).exists() {
+            return Err(MemoraError::Invalid(format!(
+                "remote '{remote_name}' has no branch '{branch}'"
+            )));
+        }
+        let remote_tip = remote_refs.read_branch(branch)?.ok_or_else(|| {
+            MemoraError::Invalid(format!(
+                "remote branch '{remote_name}/{branch}' has no commits"
+            ))
+        })?;
+
+        // Already at the remote's tip?
+        let existing = self
+            .refs
+            .remote_ref_path(remote_name, branch)
+            .exists()
+            .then(|| self.refs.read_remote_ref(remote_name, branch).ok())
+            .flatten();
+        if existing.as_deref() == Some(remote_tip.as_str())
+            && self.store.get_commit(&remote_tip)?.is_some()
+        {
+            return Ok(SyncOutcome {
+                direction: SyncDirection::Pull,
+                branch: branch.to_string(),
+                commits_copied: 0,
+                new_tip: Some(remote_tip),
+                already_synced: true,
+                rejected_non_fast_forward: false,
+            });
+        }
+
+        let copied = copy_commits_between(&remote_store, &self.store, &remote_tip)?;
+        self.refs
+            .write_remote_ref(remote_name, branch, &remote_tip)?;
+
+        Ok(SyncOutcome {
+            direction: SyncDirection::Pull,
+            branch: branch.to_string(),
+            commits_copied: copied.len(),
+            new_tip: Some(remote_tip),
+            already_synced: false,
+            rejected_non_fast_forward: false,
+        })
     }
 }
 
@@ -1872,5 +2108,234 @@ mod phase4_tests {
             .unwrap();
         let parsed: Vec<MemoryNode> = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed.len(), 2);
+    }
+}
+
+
+#[cfg(test)]
+mod phase5_tests {
+    use super::*;
+    use crate::node::{MemoryKind, MemorySource, NewNode};
+    use std::path::Path;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use tempfile::tempdir;
+
+    struct StepClock(AtomicI64);
+    impl Clock for StepClock {
+        fn now(&self) -> i64 {
+            self.0.fetch_add(1, Ordering::SeqCst)
+        }
+    }
+
+    fn new_repo(path: &Path, start: i64) -> Repository {
+        Repository::init(path)
+            .unwrap()
+            .with_clock(Box::new(StepClock(AtomicI64::new(start))))
+    }
+
+    fn open_repo(path: &Path, start: i64) -> Repository {
+        Repository::open(path)
+            .unwrap()
+            .with_clock(Box::new(StepClock(AtomicI64::new(start))))
+    }
+
+    #[test]
+    fn add_and_remove_remote_round_trip() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path(), 1_000);
+        // Build a remote target dir we can point at.
+        let other = tempdir().unwrap();
+        let _r2 = new_repo(other.path(), 2_000);
+
+        repo.add_remote("origin", other.path().to_str().unwrap())
+            .unwrap();
+        let listed = repo.list_remotes().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].0, "origin");
+
+        // Re-loaded config still has it.
+        let reloaded = repo.config().unwrap();
+        assert!(reloaded.remote("origin").is_some());
+
+        assert!(repo.remove_remote("origin").unwrap());
+        assert!(repo.list_remotes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn push_copies_commits_to_remote_and_advances_branch() {
+        let local_tmp = tempdir().unwrap();
+        let remote_tmp = tempdir().unwrap();
+        let local = new_repo(local_tmp.path(), 1_000);
+        let _remote_init = new_repo(remote_tmp.path(), 2_000);
+
+        local
+            .add_node(NewNode::new(
+                MemoryKind::Project,
+                "uses Rust",
+                MemorySource::CodeRead,
+            ))
+            .unwrap();
+        local.commit("first", "human").unwrap();
+        local
+            .add_remote("origin", remote_tmp.path().to_str().unwrap())
+            .unwrap();
+        let outcome = local.push("origin", "main").unwrap();
+        assert!(!outcome.rejected_non_fast_forward);
+        assert_eq!(outcome.commits_copied, 1);
+        // Remote-tracking ref present.
+        assert!(local
+            .refs()
+            .remote_ref_path("origin", "main")
+            .exists());
+
+        // Open the remote and confirm it has the commit + node.
+        let remote = open_repo(remote_tmp.path(), 5_000);
+        let log = remote.log(None).unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(remote.store().all_nodes().unwrap().len(), 0);
+        // node_versions snapshot is what carries node payload, not live nodes.
+        let versions = remote
+            .store()
+            .commit_node_versions(&log[0].id)
+            .unwrap();
+        assert_eq!(versions.len(), 1);
+    }
+
+    #[test]
+    fn push_then_no_op_push_reports_already_synced() {
+        let local_tmp = tempdir().unwrap();
+        let remote_tmp = tempdir().unwrap();
+        let local = new_repo(local_tmp.path(), 1_000);
+        let _r = new_repo(remote_tmp.path(), 2_000);
+        local
+            .add_node(NewNode::new(
+                MemoryKind::Project,
+                "rust",
+                MemorySource::CodeRead,
+            ))
+            .unwrap();
+        local.commit("c1", "human").unwrap();
+        local
+            .add_remote("origin", remote_tmp.path().to_str().unwrap())
+            .unwrap();
+        local.push("origin", "main").unwrap();
+        let again = local.push("origin", "main").unwrap();
+        assert!(again.already_synced);
+        assert_eq!(again.commits_copied, 0);
+    }
+
+    #[test]
+    fn push_rejects_non_fast_forward() {
+        let local_tmp = tempdir().unwrap();
+        let remote_tmp = tempdir().unwrap();
+        let local = new_repo(local_tmp.path(), 1_000);
+        let remote = new_repo(remote_tmp.path(), 2_000);
+
+        // Both make different first commits (their histories diverge from
+        // the start, so neither ancestor-of-the-other check holds).
+        local
+            .add_node(NewNode::new(
+                MemoryKind::Project,
+                "local",
+                MemorySource::CodeRead,
+            ))
+            .unwrap();
+        local.commit("local-c1", "human").unwrap();
+        remote
+            .add_node(NewNode::new(
+                MemoryKind::Project,
+                "remote",
+                MemorySource::CodeRead,
+            ))
+            .unwrap();
+        remote.commit("remote-c1", "human").unwrap();
+
+        local
+            .add_remote("origin", remote_tmp.path().to_str().unwrap())
+            .unwrap();
+        let outcome = local.push("origin", "main").unwrap();
+        assert!(outcome.rejected_non_fast_forward);
+        assert_eq!(outcome.commits_copied, 0);
+    }
+
+    #[test]
+    fn pull_copies_remote_commits_and_records_tracking_ref() {
+        let local_tmp = tempdir().unwrap();
+        let remote_tmp = tempdir().unwrap();
+        let local = new_repo(local_tmp.path(), 1_000);
+        let remote = new_repo(remote_tmp.path(), 2_000);
+
+        remote
+            .add_node(NewNode::new(
+                MemoryKind::Semantic,
+                "remote fact",
+                MemorySource::CodeRead,
+            ))
+            .unwrap();
+        remote.commit("remote first", "human").unwrap();
+
+        local
+            .add_remote("origin", remote_tmp.path().to_str().unwrap())
+            .unwrap();
+        let outcome = local.pull("origin", "main").unwrap();
+        assert_eq!(outcome.commits_copied, 1);
+        assert!(local
+            .refs()
+            .remote_ref_path("origin", "main")
+            .exists());
+
+        // After pull, `origin/main` resolves to the remote tip.
+        let resolved = local.resolve_revision("origin/main").unwrap();
+        let log_ids: Vec<String> = remote.log(None).unwrap().into_iter().map(|c| c.id).collect();
+        assert_eq!(resolved, log_ids[0]);
+    }
+
+    #[test]
+    fn merge_after_pull_advances_local_branch() {
+        let local_tmp = tempdir().unwrap();
+        let remote_tmp = tempdir().unwrap();
+        let local = new_repo(local_tmp.path(), 1_000);
+        let remote = new_repo(remote_tmp.path(), 2_000);
+
+        remote
+            .add_node(NewNode::new(
+                MemoryKind::Project,
+                "shared",
+                MemorySource::CodeRead,
+            ))
+            .unwrap();
+        remote.commit("base", "human").unwrap();
+        local
+            .add_remote("origin", remote_tmp.path().to_str().unwrap())
+            .unwrap();
+        local.pull("origin", "main").unwrap();
+        // Local's main is still empty; merge origin/main fast-forwards it.
+        let outcome = local
+            .merge("origin/main", MergeOptions::default())
+            .unwrap();
+        assert!(matches!(
+            outcome.kind,
+            MergeKind::FastForward | MergeKind::Merged
+        ));
+    }
+
+    #[test]
+    fn gc_two_phase_via_repository() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path(), 1_000);
+        repo.add_node(NewNode {
+            confidence: Some(0.05),
+            ..NewNode::new(
+                MemoryKind::Assumption,
+                "weak",
+                MemorySource::ModelInference,
+            )
+        })
+        .unwrap();
+        let r1 = repo.gc(GcOptions::default()).unwrap();
+        assert_eq!(r1.marked(), 1);
+        let r2 = repo.gc(GcOptions::default()).unwrap();
+        assert_eq!(r2.swept(), 1);
+        assert_eq!(repo.store().all_nodes().unwrap().len(), 0);
     }
 }

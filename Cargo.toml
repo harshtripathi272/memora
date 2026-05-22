@@ -38,6 +38,7 @@ indicatif = "0.17"
 # Misc
 uuid = { version = "1", features = ["v4"] }
 dirs = "5"
+toml = "0.8"
 
 [profile.release]
 opt-level = 3
