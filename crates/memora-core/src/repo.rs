@@ -8,8 +8,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::commit::{commit_id, tree_id_for_nodes, CommitStats, MemoryCommit};
+use crate::commit::{commit_id_with_parents, tree_id_for_nodes, CommitStats, MemoryCommit};
 use crate::error::{MemoraError, Result};
+use crate::merge::{plan_merge, MergePlan, MergeStrategy, NodeDecision};
 use crate::node::{MemoryKind, MemoryNode, MemoryStatus, NewNode};
 use crate::store::{HeadRef, Refs, Store, UnstagedSummary};
 use crate::time::{Clock, SystemClock};
@@ -180,6 +181,17 @@ impl Repository {
     /// author. If there are no changes since HEAD, returns
     /// [`CommitOutcome`] with `commit: None`.
     pub fn commit(&self, message: &str, author: &str) -> Result<CommitOutcome> {
+        self.commit_with_parents(message, author, &[])
+    }
+
+    /// Same as [`Self::commit`] but with explicit *additional* parent commit
+    /// ids. The first parent always comes from HEAD. Used by `merge`.
+    pub fn commit_with_parents(
+        &self,
+        message: &str,
+        author: &str,
+        extra_parents: &[String],
+    ) -> Result<CommitOutcome> {
         let head_ref = self.refs.read_head()?;
         let parent = self.head_commit_id()?;
 
@@ -199,7 +211,10 @@ impl Repository {
         let nodes = self.store.all_nodes()?;
         let tree = tree_id_for_nodes(&nodes);
 
-        // Detect "nothing to commit": same tree id as parent.
+        // Detect "nothing to commit": same tree id as parent, *and* no
+        // additional parents (a merge commit always wants to be recorded
+        // even if the tree happened to match — e.g. for already-up-to-date
+        // we never reach here because the merge code short-circuits earlier).
         let parent_tree = match parent.as_deref() {
             Some(p) => self
                 .store
@@ -208,7 +223,7 @@ impl Repository {
                 .unwrap_or_default(),
             None => tree_id_for_nodes(&[]),
         };
-        if parent.is_some() && tree == parent_tree {
+        if extra_parents.is_empty() && parent.is_some() && tree == parent_tree {
             return Ok(CommitOutcome {
                 commit: None,
                 branch: head_ref.branch().map(str::to_string),
@@ -243,7 +258,7 @@ impl Repository {
         }
 
         let now = self.clock.now();
-        let id = commit_id(parent.as_deref(), &tree, author, message, now);
+        let id = commit_id_with_parents(parent.as_deref(), extra_parents, &tree, author, message, now);
         let commit = MemoryCommit {
             id: id.clone(),
             parent: parent.clone(),
@@ -258,6 +273,9 @@ impl Repository {
         node_ids.sort();
         self.store.insert_commit_nodes(&id, &node_ids)?;
         self.store.insert_node_versions(&id, &nodes)?;
+        if !extra_parents.is_empty() {
+            self.store.insert_merge_parents(&id, extra_parents)?;
+        }
 
         let branch_name = head_ref.branch().map(str::to_string);
         match &head_ref {
@@ -301,11 +319,37 @@ impl Repository {
     }
 
     /// Switch HEAD to the given branch. The branch must already exist.
+    /// The working set is rewritten to match the target branch's tip.
+    /// Refuses to switch if there are uncommitted changes; commit them or
+    /// stash them by branching first (`memora branch foo`).
     pub fn switch_branch(&self, name: &str) -> Result<()> {
         if !self.refs.branch_path(name).exists() {
             return Err(MemoraError::RefNotFound(name.to_string()));
         }
-        self.refs.write_head_branch(name)
+
+        // Refuse if the working set has uncommitted changes.
+        let summary = self.status()?;
+        if !summary.added.is_empty()
+            || !summary.modified.is_empty()
+            || !summary.removed.is_empty()
+        {
+            return Err(MemoraError::Invalid(format!(
+                "uncommitted changes in working set ({} added, {} modified, {} removed) — commit or branch first",
+                summary.added.len(),
+                summary.modified.len(),
+                summary.removed.len(),
+            )));
+        }
+
+        // Move HEAD then rewrite the working set from the target's node_versions.
+        self.refs.write_head_branch(name)?;
+        let target_commit = self.refs.read_branch(name)?;
+        let target_nodes = match target_commit.as_deref() {
+            Some(c) => self.store.commit_node_versions(c)?,
+            None => Vec::new(),
+        };
+        self.replace_working_set(&target_nodes)?;
+        Ok(())
     }
 
     /// Reset HEAD to a specific commit id, leaving the working set as it
@@ -338,6 +382,137 @@ impl Repository {
             HeadRef::Detached(_) => self.refs.write_head_detached(&target.id)?,
         }
         Ok(target)
+    }
+
+    // --- merge -----------------------------------------------------------
+
+    /// Plan a merge of `their_rev` into the current HEAD. Pure: does not
+    /// touch the working set. Useful for `--dry-run` style flows.
+    pub fn plan_merge(
+        &self,
+        their_rev: &str,
+        strategy: MergeStrategy,
+    ) -> Result<MergePlan> {
+        let ours = self
+            .head_commit_id()?
+            .ok_or_else(|| MemoraError::CommitNotFound("HEAD".into()))?;
+        let theirs = self.resolve_revision(their_rev)?;
+        plan_merge(&self.store, &ours, &theirs, strategy)
+    }
+
+    /// Merge `their_rev` into the current HEAD. The behaviour is:
+    ///
+    /// - **already up-to-date**: no-op, returns the existing HEAD.
+    /// - **fast-forward**: if `--ff` is allowed, just move HEAD's branch.
+    /// - **true merge**: rewrite the working set from the merge plan and
+    ///   create a merge commit (unless `commit == false`).
+    pub fn merge(
+        &self,
+        their_rev: &str,
+        opts: MergeOptions,
+    ) -> Result<MergeOutcome> {
+        let ours = self
+            .head_commit_id()?
+            .ok_or_else(|| MemoraError::CommitNotFound("HEAD".into()))?;
+        let theirs = self.resolve_revision(their_rev)?;
+        let plan = plan_merge(&self.store, &ours, &theirs, opts.strategy)?;
+
+        if plan.already_up_to_date {
+            return Ok(MergeOutcome {
+                kind: MergeKind::AlreadyUpToDate,
+                plan,
+                commit: None,
+            });
+        }
+
+        if plan.can_fast_forward && opts.allow_fast_forward {
+            // Fast-forward: just point our branch at theirs and overwrite
+            // the working set with theirs's snapshot.
+            let their_nodes = self.store.commit_node_versions(&theirs)?;
+            self.replace_working_set(&their_nodes)?;
+            match self.refs.read_head()? {
+                HeadRef::Branch(name) => self.refs.write_branch(&name, &theirs)?,
+                HeadRef::Detached(_) => self.refs.write_head_detached(&theirs)?,
+            }
+            let commit = self.store.get_commit(&theirs)?;
+            return Ok(MergeOutcome {
+                kind: MergeKind::FastForward,
+                plan,
+                commit,
+            });
+        }
+
+        // True merge: apply the plan to the working set.
+        self.apply_plan_to_working_set(&plan)?;
+
+        if !opts.commit {
+            return Ok(MergeOutcome {
+                kind: MergeKind::NoCommit,
+                plan,
+                commit: None,
+            });
+        }
+
+        let message = opts.message.clone().unwrap_or_else(|| {
+            format!(
+                "Merge {} into {}",
+                short_for_display(&theirs),
+                self.refs
+                    .read_head()
+                    .ok()
+                    .as_ref()
+                    .and_then(|h| h.branch().map(str::to_string))
+                    .unwrap_or_else(|| "HEAD".into()),
+            )
+        });
+        let outcome = self.commit_with_parents(&message, &opts.author, &[theirs.clone()])?;
+        let kind = if plan.has_conflicts() {
+            MergeKind::Conflicts
+        } else {
+            MergeKind::Merged
+        };
+        Ok(MergeOutcome {
+            kind,
+            plan,
+            commit: outcome.commit,
+        })
+    }
+
+    /// Replace the live `nodes` table with the contents of `target`.
+    /// Used by fast-forward merge.
+    fn replace_working_set(&self, target: &[MemoryNode]) -> Result<()> {
+        let current = self.store.all_nodes()?;
+        let target_ids: std::collections::HashSet<&str> =
+            target.iter().map(|n| n.id.as_str()).collect();
+        for n in &current {
+            if !target_ids.contains(n.id.as_str()) {
+                self.store.delete_node(&n.id)?;
+            }
+        }
+        for n in target {
+            self.store.upsert_node(n)?;
+        }
+        Ok(())
+    }
+
+    /// Apply a [`MergePlan`] to the working set in place.
+    fn apply_plan_to_working_set(&self, plan: &MergePlan) -> Result<()> {
+        for entry in &plan.entries {
+            match &entry.decision {
+                NodeDecision::Unchanged => {}
+                NodeDecision::Removed => {
+                    self.store.delete_node(&entry.id)?;
+                }
+                _ => {
+                    if let Some(node) = &entry.resolved {
+                        self.store.upsert_node(node)?;
+                    } else {
+                        self.store.delete_node(&entry.id)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     // --- promotion -------------------------------------------------------
@@ -460,6 +635,65 @@ impl Repository {
 // ---------------------------------------------------------------------------
 // Free helpers + supporting types used by promote/diff above.
 // ---------------------------------------------------------------------------
+
+/// Options controlling [`Repository::merge`].
+#[derive(Debug, Clone)]
+pub struct MergeOptions {
+    /// Strategy for resolving same-id divergences. Defaults to `Auto`.
+    pub strategy: MergeStrategy,
+    /// Allow fast-forward when possible (default: `true`).
+    pub allow_fast_forward: bool,
+    /// Create a merge commit at the end (default: `true`). When `false`,
+    /// the working set is left in a merged state without committing.
+    pub commit: bool,
+    /// Override commit message. Defaults to `"Merge <theirs> into <branch>"`.
+    pub message: Option<String>,
+    /// Author for the merge commit. Defaults to `"human"`.
+    pub author: String,
+}
+
+impl Default for MergeOptions {
+    fn default() -> Self {
+        Self {
+            strategy: MergeStrategy::Auto,
+            allow_fast_forward: true,
+            commit: true,
+            message: None,
+            author: "human".into(),
+        }
+    }
+}
+
+/// What `memora merge` actually did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeKind {
+    /// `theirs` was already an ancestor of `ours`. Nothing to do.
+    AlreadyUpToDate,
+    /// HEAD was fast-forwarded to `theirs`.
+    FastForward,
+    /// A real three-way merge happened, no conflicts.
+    Merged,
+    /// A real three-way merge happened with at least one conflict.
+    Conflicts,
+    /// Plan was applied to the working set but no commit was created.
+    NoCommit,
+}
+
+/// Result returned by [`Repository::merge`].
+#[derive(Debug, Clone)]
+pub struct MergeOutcome {
+    /// What kind of merge happened.
+    pub kind: MergeKind,
+    /// The plan that was computed.
+    pub plan: MergePlan,
+    /// The commit that was created, if any (None for `AlreadyUpToDate`,
+    /// `FastForward` returns `theirs`, `NoCommit` returns `None`).
+    pub commit: Option<MemoryCommit>,
+}
+
+fn short_for_display(id: &str) -> String {
+    id.chars().take(7).collect()
+}
 
 /// Caller intent for [`Repository::promote`].
 #[derive(Debug, Clone)]
@@ -961,5 +1195,200 @@ mod tests {
         assert_eq!(diff.added.len(), 1);
         assert_eq!(diff.modified.len(), 0);
         assert_eq!(diff.removed.len(), 0);
+    }
+
+    // -------------------------- merge tests --------------------------
+
+    #[test]
+    fn merge_already_up_to_date_is_noop() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path());
+        repo.add_node(NewNode::new(MemoryKind::Project, "v1", MemorySource::CodeRead))
+            .unwrap();
+        repo.commit("c1", "human").unwrap();
+        repo.create_branch("feature/x").unwrap();
+        // ours == theirs.
+        let outcome = repo.merge("feature/x", MergeOptions::default()).unwrap();
+        assert_eq!(outcome.kind, MergeKind::AlreadyUpToDate);
+    }
+
+    #[test]
+    fn merge_fast_forward_advances_branch() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path());
+        // base commit on main.
+        repo.add_node(NewNode::new(MemoryKind::Project, "v1", MemorySource::CodeRead))
+            .unwrap();
+        repo.commit("c1", "human").unwrap();
+        repo.create_branch("feature").unwrap();
+        // advance feature.
+        repo.switch_branch("feature").unwrap();
+        repo.add_node(NewNode::new(MemoryKind::Project, "v2", MemorySource::CodeRead))
+            .unwrap();
+        let c2 = repo.commit("c2", "human").unwrap().commit.unwrap();
+        // back to main and merge feature.
+        repo.switch_branch("main").unwrap();
+        let outcome = repo.merge("feature", MergeOptions::default()).unwrap();
+        assert_eq!(outcome.kind, MergeKind::FastForward);
+        assert_eq!(repo.head_commit_id().unwrap().as_deref(), Some(c2.id.as_str()));
+    }
+
+    #[test]
+    fn merge_clean_three_way_picks_up_disjoint_changes() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path());
+        repo.add_node(NewNode::new(
+            MemoryKind::Project,
+            "shared",
+            MemorySource::CodeRead,
+        ))
+        .unwrap();
+        repo.commit("base", "human").unwrap();
+        // feature: add a new node only on this side.
+        repo.create_branch("feature").unwrap();
+        repo.switch_branch("feature").unwrap();
+        repo.add_node(NewNode::new(
+            MemoryKind::Semantic,
+            "auth uses jwt",
+            MemorySource::CodeRead,
+        ))
+        .unwrap();
+        repo.commit("feat", "human").unwrap();
+        // main: add a different node.
+        repo.switch_branch("main").unwrap();
+        repo.add_node(NewNode::new(
+            MemoryKind::Preference,
+            "verbose errors",
+            MemorySource::Manual,
+        ))
+        .unwrap();
+        repo.commit("pref", "human").unwrap();
+        // merge feature into main.
+        let outcome = repo.merge("feature", MergeOptions::default()).unwrap();
+        assert_eq!(outcome.kind, MergeKind::Merged);
+        let nodes = repo.store().all_nodes().unwrap();
+        let contents: std::collections::HashSet<String> =
+            nodes.into_iter().map(|n| n.content).collect();
+        assert!(contents.contains("shared"));
+        assert!(contents.contains("auth uses jwt"));
+        assert!(contents.contains("verbose errors"));
+        assert!(!outcome.plan.has_conflicts());
+        assert!(outcome.commit.is_some());
+        let commit = outcome.commit.unwrap();
+        let merge_parents = repo.store().merge_parents(&commit.id).unwrap();
+        assert_eq!(merge_parents.len(), 1);
+    }
+
+    #[test]
+    fn merge_resolves_same_node_change_by_confidence() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path());
+        let base_node = repo
+            .add_node(NewNode::new(
+                MemoryKind::Assumption,
+                "redis is the cache",
+                MemorySource::ModelInference,
+            ))
+            .unwrap();
+        repo.commit("base", "human").unwrap();
+        repo.create_branch("feature").unwrap();
+        // ours promote with model-inference baseline confidence (0.6).
+        repo.store()
+            .set_status(&base_node.id, MemoryStatus::Stable, 1234)
+            .unwrap();
+        repo.commit("ours promote", "human").unwrap();
+        // theirs: switch to feature *before* mutating, then promote with
+        // a higher confidence so the merge has a reason to pick theirs.
+        repo.switch_branch("feature").unwrap();
+        let mut node = repo.store().get_node(&base_node.id).unwrap().unwrap();
+        node.confidence = 0.95;
+        node.status = MemoryStatus::Stable;
+        node.updated_at += 1;
+        repo.store().upsert_node(&node).unwrap();
+        repo.commit("theirs promote with high confidence", "human")
+            .unwrap();
+        // back to main and merge feature.
+        repo.switch_branch("main").unwrap();
+        let outcome = repo.merge("feature", MergeOptions::default()).unwrap();
+        assert_eq!(outcome.kind, MergeKind::Merged);
+        let merged = repo.store().get_node(&base_node.id).unwrap().unwrap();
+        assert_eq!(merged.status, MemoryStatus::Stable);
+        assert!(merged.confidence > 0.9);
+    }
+
+    #[test]
+    fn merge_with_strategy_ours_keeps_our_side() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path());
+        let base_node = repo
+            .add_node(NewNode::new(
+                MemoryKind::Project,
+                "rust",
+                MemorySource::CodeRead,
+            ))
+            .unwrap();
+        repo.commit("base", "human").unwrap();
+        repo.create_branch("feature").unwrap();
+        // ours edits content (still on main).
+        let mut ours = repo.store().get_node(&base_node.id).unwrap().unwrap();
+        ours.content = "rust+wasm".into();
+        ours.updated_at += 1;
+        repo.store().upsert_node(&ours).unwrap();
+        repo.commit("ours", "human").unwrap();
+        // switch to feature, edit differently.
+        repo.switch_branch("feature").unwrap();
+        let mut theirs = repo.store().get_node(&base_node.id).unwrap().unwrap();
+        theirs.content = "rust+ts".into();
+        theirs.updated_at += 2;
+        repo.store().upsert_node(&theirs).unwrap();
+        repo.commit("theirs", "human").unwrap();
+        repo.switch_branch("main").unwrap();
+        let outcome = repo
+            .merge(
+                "feature",
+                MergeOptions {
+                    strategy: MergeStrategy::Ours,
+                    ..MergeOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome.kind, MergeKind::Merged);
+        let merged = repo.store().get_node(&base_node.id).unwrap().unwrap();
+        assert_eq!(merged.content, "rust+wasm");
+    }
+
+    #[test]
+    fn merge_marks_conflict_when_strategy_auto_ties() {
+        let tmp = tempdir().unwrap();
+        let repo = new_repo(tmp.path());
+        let base_node = repo
+            .add_node(NewNode::new(
+                MemoryKind::Project,
+                "rust",
+                MemorySource::CodeRead,
+            ))
+            .unwrap();
+        repo.commit("base", "human").unwrap();
+        repo.create_branch("feature").unwrap();
+        // ours edits content with a fixed updated_at so it stays equal to theirs.
+        let ts = 5_000;
+        let mut ours = repo.store().get_node(&base_node.id).unwrap().unwrap();
+        ours.content = "rust+wasm".into();
+        ours.updated_at = ts;
+        repo.store().upsert_node(&ours).unwrap();
+        repo.commit("ours", "human").unwrap();
+        // switch to feature, edit different content with the same ts.
+        repo.switch_branch("feature").unwrap();
+        let mut theirs = repo.store().get_node(&base_node.id).unwrap().unwrap();
+        theirs.content = "rust+ts".into();
+        theirs.updated_at = ts;
+        repo.store().upsert_node(&theirs).unwrap();
+        repo.commit("theirs", "human").unwrap();
+        repo.switch_branch("main").unwrap();
+        let outcome = repo.merge("feature", MergeOptions::default()).unwrap();
+        assert_eq!(outcome.kind, MergeKind::Conflicts);
+        assert!(outcome.plan.has_conflicts());
+        let merged = repo.store().get_node(&base_node.id).unwrap().unwrap();
+        assert_eq!(merged.status, MemoryStatus::Conflicted);
     }
 }

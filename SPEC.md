@@ -116,6 +116,13 @@ CREATE TABLE node_versions (
     PRIMARY KEY (commit_id, node_id)
 );
 
+CREATE TABLE merge_parents (
+    commit_id TEXT NOT NULL REFERENCES commits(id) ON DELETE CASCADE,
+    parent_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    PRIMARY KEY (commit_id, sequence)
+);
+
 CREATE TABLE sessions (
     id TEXT PRIMARY KEY,
     started_at INTEGER NOT NULL,
@@ -135,8 +142,14 @@ CREATE TABLE session_events (
 
 Indexes are `idx_nodes_kind`, `idx_nodes_status`, `idx_nodes_updated`,
 `idx_commits_parent`, `idx_commits_ts`, `idx_commit_nodes_node`,
-`idx_node_versions_node`, `idx_session_events_session`. They are advisory:
-any tool may rebuild them.
+`idx_node_versions_node`, `idx_merge_parents_commit`,
+`idx_session_events_session`. They are advisory: any tool may rebuild them.
+
+A commit with two or more parents is a **merge commit**. The *first*
+parent stays in `commits.parent_id` so the canonical first-parent log walk
+keeps working. Any additional parents live in `merge_parents`, ordered by
+`sequence`. The full parent set of a commit is therefore
+`{commits.parent_id} ∪ {merge_parents.parent_id WHERE commit_id = …}`.
 
 `PRAGMA foreign_keys = ON` and `PRAGMA journal_mode = WAL` are required for
 correctness and concurrency.
@@ -151,6 +164,21 @@ correctness and concurrency.
   ascending and joined with `\n`.
 - **Commit id**: lowercase hex SHA-256 of
   `"v1\nparent:<parent-or-empty>\ntree:<tree>\nauthor:<author>\nts:<ts>\nmsg:<msg>"`.
+
+For a merge commit the `parent` line above contains the *first* parent
+only. Every additional parent is appended on its own `parentN:<id>` line
+in sequence order, e.g.:
+
+```
+v1
+parent:<first>
+parent2:<second>
+parent3:<third>
+tree:<tree>
+author:<author>
+ts:<ts>
+msg:<msg>
+```
 
 These are the canonical formulas. Implementations MUST produce identical ids
 for identical inputs.

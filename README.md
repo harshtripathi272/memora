@@ -108,13 +108,14 @@ Ephemeral ──promote──▶ Stable ──gc──▶ Deprecated
 | `memora status`                           | Show what has changed since HEAD.                        |
 | `memora log [--oneline] [-n N]`           | Print commit history.                                    |
 | `memora branch [NAME]`                    | List or create branches.                                 |
-| `memora switch NAME`                      | Move HEAD to an existing branch.                         |
+| `memora switch NAME`                      | Move HEAD to an existing branch (working set follows).   |
 | `memora rollback --to <commit>`           | Reset HEAD to a previous commit (auto-checkpoint first). |
 | `memora promote --id <NODE> \| --type <KIND> \| --all-confirmed [T]` | Promote ephemeral nodes to stable. |
 | `memora diff [FROM] [TO] [--working] [--semantic]` | Show belief changes between two revisions.        |
+| `memora merge BRANCH [--strategy auto\|ours\|theirs] [--no-ff] [--no-commit] [--dry-run]` | Three-way merge another branch into HEAD. |
 
-Future phases add `merge`, `replay`, `export`, `import`, `gc`, `push`,
-`pull`. See `SPEC.md` for the full roadmap.
+Future phases add `replay`, `export`, `import`, `gc`, `push`, `pull`. See
+`SPEC.md` for the full roadmap.
 
 ---
 

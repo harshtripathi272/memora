@@ -283,3 +283,132 @@ fn diff_against_working_set_picks_up_uncommitted_changes() {
         .stdout(predicate::str::contains("Added:"))
         .stdout(predicate::str::contains("v2"));
 }
+
+
+#[test]
+fn merge_clean_three_way_via_cli() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path();
+
+    memora().arg("init").current_dir(path).assert().success();
+    memora()
+        .args(["add", "--type", "project", "--content", "shared", "--source", "code-read"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["commit", "-m", "base"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["branch", "feature"])
+        .current_dir(path)
+        .assert()
+        .success();
+    // diverge: feature side
+    memora()
+        .args(["switch", "feature"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args([
+            "add", "--type", "semantic", "--content", "auth uses jwt", "--source", "code-read",
+        ])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["commit", "-m", "feat"])
+        .current_dir(path)
+        .assert()
+        .success();
+    // diverge: main side
+    memora()
+        .args(["switch", "main"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args([
+            "add",
+            "--type",
+            "preference",
+            "--content",
+            "verbose errors",
+            "--source",
+            "manual",
+        ])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["commit", "-m", "pref"])
+        .current_dir(path)
+        .assert()
+        .success();
+    // merge feature into main
+    memora()
+        .args(["merge", "feature"])
+        .current_dir(path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Merged"));
+}
+
+#[test]
+fn merge_dry_run_does_not_change_anything() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path();
+    memora().arg("init").current_dir(path).assert().success();
+    memora()
+        .args(["add", "--type", "project", "--content", "x", "--source", "code-read"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["commit", "-m", "c1"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["branch", "feature"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["merge", "feature", "--dry-run"])
+        .current_dir(path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("merge plan"));
+}
+
+#[test]
+fn merge_already_up_to_date_via_cli() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path();
+    memora().arg("init").current_dir(path).assert().success();
+    memora()
+        .args(["add", "--type", "project", "--content", "x", "--source", "code-read"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["commit", "-m", "c1"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["branch", "feature"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["merge", "feature"])
+        .current_dir(path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Already up to date"));
+}

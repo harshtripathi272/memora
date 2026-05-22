@@ -14,6 +14,7 @@ mod commit;
 mod diff;
 mod init;
 mod log;
+mod merge;
 mod promote;
 mod rollback;
 mod status;
@@ -32,5 +33,6 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Rollback(args) => rollback::run(args),
         Command::Promote(args) => promote::run(args),
         Command::Diff(args) => diff::run(args),
+        Command::Merge(args) => merge::run(args),
     }
 }
