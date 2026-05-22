@@ -99,6 +99,23 @@ CREATE TABLE commit_nodes (
     PRIMARY KEY (commit_id, node_id)
 );
 
+CREATE TABLE node_versions (
+    commit_id TEXT NOT NULL REFERENCES commits(id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    content TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    status TEXT NOT NULL,
+    source TEXT NOT NULL,
+    evidence TEXT,
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    related_to_json TEXT NOT NULL DEFAULT '[]',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    PRIMARY KEY (commit_id, node_id)
+);
+
 CREATE TABLE sessions (
     id TEXT PRIMARY KEY,
     started_at INTEGER NOT NULL,
@@ -118,7 +135,8 @@ CREATE TABLE session_events (
 
 Indexes are `idx_nodes_kind`, `idx_nodes_status`, `idx_nodes_updated`,
 `idx_commits_parent`, `idx_commits_ts`, `idx_commit_nodes_node`,
-`idx_session_events_session`. They are advisory: any tool may rebuild them.
+`idx_node_versions_node`, `idx_session_events_session`. They are advisory:
+any tool may rebuild them.
 
 `PRAGMA foreign_keys = ON` and `PRAGMA journal_mode = WAL` are required for
 correctness and concurrency.

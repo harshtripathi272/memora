@@ -11,8 +11,10 @@ use crate::cli::{Cli, Command};
 mod add;
 mod branch;
 mod commit;
+mod diff;
 mod init;
 mod log;
+mod promote;
 mod rollback;
 mod status;
 mod switch;
@@ -28,5 +30,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Branch(args) => branch::run(args),
         Command::Switch(args) => switch::run(args),
         Command::Rollback(args) => rollback::run(args),
+        Command::Promote(args) => promote::run(args),
+        Command::Diff(args) => diff::run(args),
     }
 }

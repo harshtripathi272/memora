@@ -3,17 +3,17 @@
 use std::env;
 
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
 use memora_core::Repository;
 
 use crate::cli::SwitchArgs;
+use crate::ui::bold;
 
 /// Entry point for the `switch` subcommand.
 pub fn run(args: SwitchArgs) -> Result<()> {
     let cwd = env::current_dir()?;
     let repo = Repository::open_from(&cwd)?;
     repo.switch_branch(&args.name)?;
-    println!("Switched to branch {}", args.name.bold());
+    println!("Switched to branch {}", bold(&args.name));
     Ok(())
 }

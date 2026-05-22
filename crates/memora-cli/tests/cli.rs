@@ -192,3 +192,94 @@ fn branch_create_and_list() {
         .success()
         .stdout(predicate::str::contains("Switched"));
 }
+
+
+#[test]
+fn promote_by_kind_then_diff_shows_status_change() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path();
+
+    memora().arg("init").current_dir(path).assert().success();
+
+    memora()
+        .args([
+            "add",
+            "--type",
+            "assumption",
+            "--content",
+            "redis is the cache",
+            "--source",
+            "model-inference",
+        ])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["commit", "-m", "initial guess"])
+        .current_dir(path)
+        .assert()
+        .success();
+
+    memora()
+        .args(["promote", "--type", "assumption"])
+        .current_dir(path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ephemeral → stable"));
+    memora()
+        .args(["commit", "-m", "promote redis"])
+        .current_dir(path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 promoted"));
+
+    memora()
+        .args(["diff", "HEAD~1", "HEAD", "--semantic"])
+        .current_dir(path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ephemeral → stable"))
+        .stdout(predicate::str::contains("Semantic summary"));
+}
+
+#[test]
+fn promote_requires_one_target() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path();
+    memora().arg("init").current_dir(path).assert().success();
+    memora()
+        .args(["promote"])
+        .current_dir(path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("specify exactly one"));
+}
+
+#[test]
+fn diff_against_working_set_picks_up_uncommitted_changes() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path();
+    memora().arg("init").current_dir(path).assert().success();
+    memora()
+        .args(["add", "--type", "project", "--content", "v1", "--source", "code-read"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["commit", "-m", "first"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["add", "--type", "project", "--content", "v2", "--source", "code-read"])
+        .current_dir(path)
+        .assert()
+        .success();
+    memora()
+        .args(["diff", "HEAD", "--working"])
+        .current_dir(path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Added:"))
+        .stdout(predicate::str::contains("v2"));
+}

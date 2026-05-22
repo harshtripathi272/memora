@@ -1,18 +1,88 @@
 //! Pretty-printing helpers for the CLI.
 //!
-//! Centralising colours and formatting here means we can later add a
-//! `--no-color` flag in one place. For now we lean on `owo_colors` to
-//! auto-detect tty support.
+//! The colour helpers here check a process-wide `COLOR_ENABLED` flag set
+//! by `main.rs` based on `NO_COLOR` and TTY detection. Each helper takes a
+//! `&str` and returns a `String` so callers can interpolate them naturally
+//! with `format!` / `println!`. When colour is disabled the helpers simply
+//! pass the string through unchanged.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use owo_colors::OwoColorize;
+
+static COLOR_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Enable or disable colour for the rest of the process. Called once from
+/// `main.rs` after parsing `NO_COLOR` and checking whether stdout is a tty.
+pub fn set_color(enabled: bool) {
+    COLOR_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+fn enabled() -> bool {
+    COLOR_ENABLED.load(Ordering::SeqCst)
+}
+
+/// Apply the *bold* attribute.
+pub fn bold(s: impl AsRef<str>) -> String {
+    if enabled() {
+        s.as_ref().bold().to_string()
+    } else {
+        s.as_ref().to_string()
+    }
+}
+
+/// Apply the *dim* attribute.
+pub fn dim(s: impl AsRef<str>) -> String {
+    if enabled() {
+        s.as_ref().dimmed().to_string()
+    } else {
+        s.as_ref().to_string()
+    }
+}
+
+/// Green text.
+pub fn green(s: impl AsRef<str>) -> String {
+    if enabled() {
+        s.as_ref().green().to_string()
+    } else {
+        s.as_ref().to_string()
+    }
+}
+
+/// Red text.
+pub fn red(s: impl AsRef<str>) -> String {
+    if enabled() {
+        s.as_ref().red().to_string()
+    } else {
+        s.as_ref().to_string()
+    }
+}
+
+/// Yellow text.
+pub fn yellow(s: impl AsRef<str>) -> String {
+    if enabled() {
+        s.as_ref().yellow().to_string()
+    } else {
+        s.as_ref().to_string()
+    }
+}
+
+/// Cyan text.
+pub fn cyan(s: impl AsRef<str>) -> String {
+    if enabled() {
+        s.as_ref().cyan().to_string()
+    } else {
+        s.as_ref().to_string()
+    }
+}
 
 /// Print an error to stderr in red. Errors come back as `anyhow::Error`
 /// from the command dispatcher so we can also show their cause chain.
 pub fn print_error(err: &anyhow::Error) {
-    eprintln!("{} {}", "error:".red().bold(), err);
+    eprintln!("{} {}", bold(red("error:")), err);
     let mut source = err.source();
     while let Some(s) = source {
-        eprintln!("  {} {}", "caused by:".dimmed(), s);
+        eprintln!("  {} {}", dim("caused by:"), s);
         source = s.source();
     }
 }

@@ -70,6 +70,15 @@ timestamps deterministically.
 - `add_node`, `status`, `commit`, `log`
 - `create_branch`, `list_branches`, `switch_branch`
 - `rollback_to` (auto-checkpoints before moving HEAD)
+- `promote` (ephemeral → stable, by id / kind / confidence threshold)
+- `diff` (graph diff between two revspecs, with optional semantic summary)
+- `resolve_revision` (`HEAD`, `HEAD~N`, branch names, hex prefixes)
+
+The diff engine compares two `node_versions` snapshots from the SQLite
+store and produces a `DiffReport` with `added` / `removed` / `modified`
+buckets. `ModifiedNode` carries a list of typed `NodeChange` deltas
+(`Status`, `Content`, `Confidence`, `Source`, `Evidence`) so callers can
+render high-level summaries without parsing strings.
 
 ## Crate: `memora-cli`
 
@@ -100,15 +109,14 @@ Centralised printing helpers (timestamps, short ids, error formatter).
 
 ## What's not built yet
 
-The roadmap in `README.md` calls out Phase 2 → Phase 5. Notable gaps:
+The roadmap in `README.md` calls out Phase 3 → Phase 5. Notable gaps:
 
-- Semantic graph diff (`memora diff --semantic`).
-- Promotion command (`memora promote`).
 - CRDT merge (`memora merge`).
 - Replay (`memora replay`, session event recording).
 - Export / import adapters (`memora export --to=claude-code`, etc.).
 - GC + remote sync.
 
 The internal types and SQLite tables already make room for these (see
-`sessions` / `session_events`, `MemoryStatus::Conflicted`,
-`commit_nodes`); we'll layer the workflows on top in subsequent commits.
+`sessions` / `session_events`, `MemoryStatus::Conflicted`, the per-commit
+`node_versions` snapshot table); we'll layer the workflows on top in
+subsequent commits.

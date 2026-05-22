@@ -110,9 +110,11 @@ Ephemeral ──promote──▶ Stable ──gc──▶ Deprecated
 | `memora branch [NAME]`                    | List or create branches.                                 |
 | `memora switch NAME`                      | Move HEAD to an existing branch.                         |
 | `memora rollback --to <commit>`           | Reset HEAD to a previous commit (auto-checkpoint first). |
+| `memora promote --id <NODE> \| --type <KIND> \| --all-confirmed [T]` | Promote ephemeral nodes to stable. |
+| `memora diff [FROM] [TO] [--working] [--semantic]` | Show belief changes between two revisions.        |
 
-Future phases add `diff`, `merge`, `replay`, `export`, `import`, `gc`,
-`promote`, `push`, `pull`. See `SPEC.md` for the full roadmap.
+Future phases add `merge`, `replay`, `export`, `import`, `gc`, `push`,
+`pull`. See `SPEC.md` for the full roadmap.
 
 ---
 

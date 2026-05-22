@@ -6,12 +6,11 @@
 use std::env;
 
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
 use memora_core::Repository;
 
 use crate::cli::RollbackArgs;
-use crate::ui::short_id;
+use crate::ui::{bold, dim, short_id, yellow};
 
 /// Entry point for the `rollback` subcommand.
 pub fn run(args: RollbackArgs) -> Result<()> {
@@ -22,14 +21,13 @@ pub fn run(args: RollbackArgs) -> Result<()> {
     let target = repo.rollback_to(&target_id, &args.author)?;
     println!(
         "{} HEAD → {} ({})",
-        "Rolled back".yellow().bold(),
-        short_id(&target.id).yellow(),
+        bold(yellow("Rolled back")),
+        yellow(short_id(&target.id)),
         target.message
     );
     println!(
         "{}",
-        "  (a pre-rollback checkpoint commit was recorded if there were uncommitted changes)"
-            .dimmed()
+        dim("  (a pre-rollback checkpoint commit was recorded if there were uncommitted changes)")
     );
     Ok(())
 }

@@ -3,11 +3,11 @@
 use std::env;
 
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
 use memora_core::Repository;
 
 use crate::cli::BranchArgs;
+use crate::ui::{bold, dim, green};
 
 /// Entry point for the `branch` subcommand.
 pub fn run(args: BranchArgs) -> Result<()> {
@@ -20,12 +20,12 @@ pub fn run(args: BranchArgs) -> Result<()> {
         let current = head.branch();
         let branches = repo.list_branches()?;
         if branches.is_empty() {
-            println!("{}", "no branches".dimmed());
+            println!("{}", dim("no branches"));
             return Ok(());
         }
         for b in branches {
             if Some(b.as_str()) == current {
-                println!("* {}", b.green().bold());
+                println!("* {}", bold(green(&b)));
             } else {
                 println!("  {b}");
             }
@@ -36,6 +36,6 @@ pub fn run(args: BranchArgs) -> Result<()> {
     // Otherwise create a new branch from HEAD.
     let name = args.name.unwrap();
     repo.create_branch(&name)?;
-    println!("{} branch {}", "Created".green().bold(), name.bold());
+    println!("{} branch {}", bold(green("Created")), bold(&name));
     Ok(())
 }

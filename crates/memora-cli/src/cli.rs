@@ -47,6 +47,12 @@ pub enum Command {
 
     /// Roll HEAD back to a specified commit, with auto checkpoint.
     Rollback(RollbackArgs),
+
+    /// Promote ephemeral nodes to stable.
+    Promote(PromoteArgs),
+
+    /// Show what changed between two commits (or commit vs working set).
+    Diff(DiffArgs),
 }
 
 /// Arguments for `memora init`.
@@ -144,4 +150,51 @@ pub struct RollbackArgs {
     /// Author name to attach to the auto-checkpoint commit.
     #[arg(long, default_value = "human")]
     pub author: String,
+}
+
+/// Arguments for `memora promote`.
+///
+/// Exactly one of `--id`, `--type`, or `--all-confirmed` must be provided.
+#[derive(Debug, clap::Args)]
+pub struct PromoteArgs {
+    /// Promote a single node by id (full or short hex).
+    #[arg(long = "id", value_name = "NODE")]
+    pub id: Option<String>,
+
+    /// Promote every ephemeral node of the given memory type.
+    #[arg(long = "type", value_name = "KIND", conflicts_with = "id")]
+    pub kind: Option<String>,
+
+    /// Promote every ephemeral node whose confidence is >= the threshold
+    /// (default 0.8 when the flag is given without a value).
+    #[arg(
+        long = "all-confirmed",
+        value_name = "THRESHOLD",
+        num_args = 0..=1,
+        default_missing_value = "0.8",
+        conflicts_with_all = ["id", "kind"],
+    )]
+    pub all_confirmed: Option<f32>,
+}
+
+/// Arguments for `memora diff`.
+#[derive(Debug, clap::Args)]
+pub struct DiffArgs {
+    /// `from` revision (commit, branch, HEAD, HEAD~N). Defaults to HEAD~1.
+    #[arg(value_name = "FROM", default_value = "HEAD~1")]
+    pub from: String,
+
+    /// `to` revision. Defaults to HEAD; pass `--working` to compare
+    /// against the uncommitted working set instead.
+    #[arg(value_name = "TO", default_value = "HEAD")]
+    pub to: String,
+
+    /// Compare `from` to the current uncommitted working set rather than
+    /// to a second commit.
+    #[arg(long)]
+    pub working: bool,
+
+    /// Include a natural-language summary of belief changes.
+    #[arg(long)]
+    pub semantic: bool,
 }

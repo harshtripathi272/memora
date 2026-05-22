@@ -3,12 +3,11 @@
 use std::env;
 
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
 use memora_core::Repository;
 
 use crate::cli::CommitArgs;
-use crate::ui::short_id;
+use crate::ui::{bold, cyan, green, red, short_id, yellow};
 
 /// Entry point for the `commit` subcommand.
 pub fn run(args: CommitArgs) -> Result<()> {
@@ -21,24 +20,24 @@ pub fn run(args: CommitArgs) -> Result<()> {
         None => {
             println!(
                 "{} no changes since the last commit.",
-                "Nothing to commit:".yellow().bold()
+                bold(yellow("Nothing to commit:"))
             );
         }
         Some(c) => {
             let branch = outcome.branch.as_deref().unwrap_or("(detached)");
             println!(
                 "[{} {}] {}",
-                branch.bold(),
-                short_id(&c.id).yellow(),
+                bold(branch),
+                yellow(short_id(&c.id)),
                 c.message
             );
             println!(
                 "  +{} added · ~{} modified · -{} removed · {} promoted · {} conflicted",
-                c.stats.added.green(),
-                c.stats.modified.cyan(),
-                c.stats.removed.red(),
-                c.stats.promoted.green(),
-                c.stats.conflicted.yellow(),
+                green(c.stats.added.to_string()),
+                cyan(c.stats.modified.to_string()),
+                red(c.stats.removed.to_string()),
+                green(c.stats.promoted.to_string()),
+                yellow(c.stats.conflicted.to_string()),
             );
         }
     }
