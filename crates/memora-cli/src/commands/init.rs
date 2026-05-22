@@ -3,11 +3,11 @@
 use std::env;
 
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
 use memora_core::Repository;
 
 use crate::cli::InitArgs;
+use crate::ui::{bold, dim, green};
 
 /// Entry point for the `init` subcommand.
 pub fn run(args: InitArgs) -> Result<()> {
@@ -18,12 +18,12 @@ pub fn run(args: InitArgs) -> Result<()> {
     let repo = Repository::init(&target)?;
     println!(
         "{} memora store at {}",
-        "Initialised".green().bold(),
+        bold(green("Initialised")),
         repo.memora_dir().display()
     );
-    println!("HEAD now points at branch {}.", "main".bold());
+    println!("HEAD now points at branch {}.", bold("main"));
     println!("Next steps:");
-    println!("  {}", "memora add --type=semantic --content=\"...\"".dimmed());
-    println!("  {}", "memora commit -m \"first memory\"".dimmed());
+    println!("  {}", dim("memora add --type=semantic --content=\"...\""));
+    println!("  {}", dim("memora commit -m \"first memory\""));
     Ok(())
 }

@@ -160,6 +160,46 @@ impl Store {
         Ok(count)
     }
 
+    /// Find candidate node ids for `memora promote`. The caller decides
+    /// what to do with the result; this just runs the SQL filter.
+    pub fn find_promotion_candidates(
+        &self,
+        kind: Option<MemoryKind>,
+        min_confidence: Option<f32>,
+    ) -> Result<Vec<String>> {
+        let mut sql = String::from(
+            "SELECT id FROM nodes WHERE status = 'ephemeral'",
+        );
+        let mut bindings: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(k) = kind {
+            sql.push_str(" AND kind = ?");
+            bindings.push(k.as_str().to_string().into());
+        }
+        if let Some(min) = min_confidence {
+            sql.push_str(" AND confidence >= ?");
+            bindings.push((min as f64).into());
+        }
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(bindings.iter()))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push(row.get::<_, String>(0)?);
+        }
+        Ok(out)
+    }
+
+    /// Update a node's `status` and `updated_at` in-place.
+    pub fn set_status(&self, id: &str, status: MemoryStatus, now: i64) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE nodes SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status.as_str(), now, id],
+        )?;
+        if changed == 0 {
+            return Err(MemoraError::NodeNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
     // --- commit CRUD ------------------------------------------------------
 
     /// Persist a commit row.
@@ -193,6 +233,57 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Persist the full per-node state snapshot for a commit. Called once
+    /// per commit alongside [`Self::insert_commit_nodes`].
+    pub fn insert_node_versions(&self, commit_id: &str, nodes: &[MemoryNode]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO node_versions (
+                    commit_id, node_id, kind, content, confidence, status, source,
+                    evidence, tags_json, related_to_json,
+                    created_at, updated_at, expires_at
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            )?;
+            for n in nodes {
+                let tags = serde_json::to_string(&n.tags)?;
+                let related = serde_json::to_string(&n.related_to)?;
+                stmt.execute(params![
+                    commit_id,
+                    n.id,
+                    n.kind.as_str(),
+                    n.content,
+                    n.confidence as f64,
+                    n.status.as_str(),
+                    n.source.as_str(),
+                    n.evidence,
+                    tags,
+                    related,
+                    n.created_at,
+                    n.updated_at,
+                    n.expires_at,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Read the per-node snapshot rows for a commit.
+    pub fn commit_node_versions(&self, commit_id: &str) -> Result<Vec<MemoryNode>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT node_id, kind, content, confidence, status, source, evidence,
+                    tags_json, related_to_json, created_at, updated_at, expires_at
+             FROM node_versions WHERE commit_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![commit_id], row_to_versioned_node)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     /// Fetch a commit by id.
@@ -346,6 +437,40 @@ fn row_to_commit(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryCommit> {
         timestamp: row.get(4)?,
         tree_id: row.get(5)?,
         stats,
+    })
+}
+
+fn row_to_versioned_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryNode> {
+    let kind_str: String = row.get(1)?;
+    let status_str: String = row.get(4)?;
+    let source_str: String = row.get(5)?;
+    let tags_json: String = row.get(7)?;
+    let related_json: String = row.get(8)?;
+
+    let kind = MemoryKind::from_str(&kind_str).map_err(to_sqlite_err)?;
+    let status = MemoryStatus::from_str(&status_str).map_err(to_sqlite_err)?;
+    let source = MemorySource::from_str(&source_str).map_err(to_sqlite_err)?;
+    let tags: Vec<String> = serde_json::from_str(&tags_json).map_err(serde_to_sqlite_err)?;
+    let related: Vec<String> =
+        serde_json::from_str(&related_json).map_err(serde_to_sqlite_err)?;
+    let updated_at: i64 = row.get(10)?;
+
+    Ok(MemoryNode {
+        id: row.get(0)?,
+        kind,
+        content: row.get(2)?,
+        confidence: row.get::<_, f64>(3)? as f32,
+        status,
+        source,
+        evidence: row.get(6)?,
+        tags,
+        related_to: related,
+        created_at: row.get(9)?,
+        updated_at,
+        // node_versions doesn't track read counters — reconstruct sane defaults.
+        last_accessed: updated_at,
+        access_count: 0,
+        expires_at: row.get(11)?,
     })
 }
 

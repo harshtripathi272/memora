@@ -39,7 +39,7 @@ pub mod time;
 pub use commit::{CommitStats, MemoryCommit};
 pub use error::{MemoraError, Result};
 pub use node::{MemoryKind, MemoryNode, MemorySource, MemoryStatus};
-pub use repo::Repository;
+pub use repo::{DiffReport, ModifiedNode, NodeChange, PromotePlan, Repository};
 
 /// On-disk format version written into `.memora/config`. Bumped whenever the
 /// schema or directory layout changes in a non backwards-compatible way.

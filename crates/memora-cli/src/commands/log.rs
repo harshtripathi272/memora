@@ -3,12 +3,11 @@
 use std::env;
 
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
 use memora_core::Repository;
 
 use crate::cli::LogArgs;
-use crate::ui::{fmt_timestamp, short_id};
+use crate::ui::{dim, fmt_timestamp, short_id, yellow};
 
 /// Entry point for the `log` subcommand.
 pub fn run(args: LogArgs) -> Result<()> {
@@ -16,14 +15,14 @@ pub fn run(args: LogArgs) -> Result<()> {
     let repo = Repository::open_from(&cwd)?;
     let commits = repo.log(args.limit)?;
     if commits.is_empty() {
-        println!("{}", "no commits yet".dimmed());
+        println!("{}", dim("no commits yet"));
         return Ok(());
     }
     for c in commits {
         if args.oneline {
-            println!("{} {}", short_id(&c.id).yellow(), c.message);
+            println!("{} {}", yellow(short_id(&c.id)), c.message);
         } else {
-            println!("{} {}", "commit".yellow(), c.id.yellow());
+            println!("{} {}", yellow("commit"), yellow(&c.id));
             if let Some(p) = &c.parent {
                 println!("Parent:    {}", short_id(p));
             }

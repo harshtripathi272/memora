@@ -4,13 +4,12 @@ use std::env;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use owo_colors::OwoColorize;
 
 use memora_core::node::{MemoryKind, MemorySource, NewNode};
 use memora_core::Repository;
 
 use crate::cli::AddArgs;
-use crate::ui::short_id;
+use crate::ui::{bold, green, short_id};
 
 /// Entry point for the `add` subcommand.
 pub fn run(args: AddArgs) -> Result<()> {
@@ -42,9 +41,9 @@ pub fn run(args: AddArgs) -> Result<()> {
 
     println!(
         "{} [{}] node {} (confidence {:.2}, status {})",
-        "Added".green().bold(),
+        bold(green("Added")),
         node.kind,
-        short_id(&node.id).bold(),
+        bold(short_id(&node.id)),
         node.confidence,
         node.status,
     );

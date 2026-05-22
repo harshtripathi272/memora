@@ -48,6 +48,28 @@ CREATE TABLE IF NOT EXISTS commit_nodes (
 
 CREATE INDEX IF NOT EXISTS idx_commit_nodes_node ON commit_nodes (node_id);
 
+-- Per-commit snapshot of each node's full state. Lets us diff two commits
+-- and see what changed inside a node (status, content, confidence, …),
+-- not just which ids appeared or disappeared.
+CREATE TABLE IF NOT EXISTS node_versions (
+    commit_id       TEXT NOT NULL REFERENCES commits(id) ON DELETE CASCADE,
+    node_id         TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    confidence      REAL NOT NULL,
+    status          TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    evidence        TEXT,
+    tags_json       TEXT NOT NULL DEFAULT '[]',
+    related_to_json TEXT NOT NULL DEFAULT '[]',
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    expires_at      INTEGER,
+    PRIMARY KEY (commit_id, node_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_node_versions_node ON node_versions (node_id);
+
 -- Replay infrastructure. Sessions and their event streams are written here
 -- so future `memora replay` can step through context evolution.
 CREATE TABLE IF NOT EXISTS sessions (
