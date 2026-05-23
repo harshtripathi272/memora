@@ -1,6 +1,6 @@
 //! # memora-core
 //!
-//! Core library for [memora](https://github.com/memora-dev/memora) — the
+//! Core library for [memora](https://github.com/harshtripathi272/memora) — the
 //! memory layer for AI agents. Provides the typed memory model, content
 //! addressed storage, snapshot / commit primitives, and the SQLite-backed
 //! store that the `memora` CLI is built on.

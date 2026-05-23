@@ -1,0 +1,98 @@
+name: Release
+
+# Triggered when you push a tag like `v0.1.0`. Builds binaries for every
+# major OS/arch and attaches them to a GitHub Release. After it runs once,
+# users can `curl`-install memora without compiling anything.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p memora-cli
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="memora-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/memora" "$name/"
+          cp README.md LICENSE "$name/"
+          tar -czf "${name}.tar.gz" "$name"
+          shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $name = "memora-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $name | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/memora.exe" "$name/"
+          Copy-Item README.md, LICENSE "$name/"
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          (Get-FileHash "$name.zip" -Algorithm SHA256).Hash | Out-File "$name.zip.sha256"
+
+      - name: Upload artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: memora-${{ matrix.target }}
+          path: |
+            memora-*.tar.gz
+            memora-*.tar.gz.sha256
+            memora-*.zip
+            memora-*.zip.sha256
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artefacts
+          merge-multiple: true
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artefacts/memora-*.tar.gz
+            artefacts/memora-*.tar.gz.sha256
+            artefacts/memora-*.zip
+            artefacts/memora-*.zip.sha256
+          generate_release_notes: true

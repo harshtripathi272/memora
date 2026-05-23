@@ -11,8 +11,8 @@ edition = "2021"
 rust-version = "1.78"
 license = "MIT"
 authors = ["The memora authors"]
-repository = "https://github.com/memora-dev/memora"
-homepage = "https://github.com/memora-dev/memora"
+repository = "https://github.com/harshtripathi272/memora"
+homepage = "https://github.com/harshtripathi272/memora"
 description = "The memory layer for AI agents — versioned, typed, portable."
 
 [workspace.dependencies]

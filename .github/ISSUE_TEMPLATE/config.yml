@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/harshtripathi272/memora/discussions
+    about: Use GitHub Discussions for open-ended questions and ideas.
