@@ -536,7 +536,7 @@ impl Repository {
                     .unwrap_or_else(|| "HEAD".into()),
             )
         });
-        let outcome = self.commit_with_parents(&message, &opts.author, &[theirs.clone()])?;
+        let outcome = self.commit_with_parents(&message, &opts.author, std::slice::from_ref(&theirs))?;
         let kind = if plan.has_conflicts() {
             MergeKind::Conflicts
         } else {
