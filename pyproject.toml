@@ -1,0 +1,34 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "memora-cli"
+version = "0.1.0"
+description = "The memory layer for AI agents — versioned, typed, portable."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Harsh Tripathi" }]
+requires-python = ">=3.8"
+keywords = ["ai", "agents", "memory", "cli", "version-control", "llm", "context"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Version Control",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/harshtripathi272/memora"
+Repository = "https://github.com/harshtripathi272/memora"
+Issues = "https://github.com/harshtripathi272/memora/issues"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "crates/memora-cli/Cargo.toml"
+strip = true
