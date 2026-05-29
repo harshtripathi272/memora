@@ -3,6 +3,7 @@
 > **The memory layer for AI agents — versioned, typed, portable, inspectable.**
 
 [![CI](https://github.com/harshtripathi272/memora/actions/workflows/ci.yml/badge.svg)](https://github.com/harshtripathi272/memora/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/memora-cli?color=blue&label=pip%20install%20memora-cli)](https://pypi.org/project/memora-cli/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Format version](https://img.shields.io/badge/format-v1-informational)](SPEC.md)
 [![Made with Rust](https://img.shields.io/badge/made%20with-Rust-orange.svg)](https://www.rust-lang.org/)
@@ -41,7 +42,16 @@ memora fixes this by treating agent memory as a first-class artefact:
 memora ships as a single static binary with zero runtime dependencies
 (SQLite is bundled). Pick whichever path is easiest:
 
-### One-liner (recommended)
+### pip (easiest)
+
+```bash
+pip install memora-cli
+```
+
+Works on Windows, macOS, and Linux. No Rust needed. After install, just
+type `memora` from any terminal.
+
+### One-liner (no pip required)
 
 **macOS / Linux:**
 ```bash
@@ -67,7 +77,7 @@ cd memora
 cargo install --path crates/memora-cli
 ```
 
-You need a Rust toolchain (1.78+); install via [rustup](https://rustup.rs/).
+Requires Rust 1.78+; install via [rustup](https://rustup.rs/).
 
 ---
 

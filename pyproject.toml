@@ -27,6 +27,7 @@ classifiers = [
 Homepage = "https://github.com/harshtripathi272/memora"
 Repository = "https://github.com/harshtripathi272/memora"
 Issues = "https://github.com/harshtripathi272/memora/issues"
+Changelog = "https://github.com/harshtripathi272/memora/blob/main/CHANGELOG.md"
 
 [tool.maturin]
 bindings = "bin"
