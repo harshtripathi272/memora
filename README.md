@@ -129,6 +129,47 @@ memora push origin
 
 ---
 
+## Example use cases
+
+### 1) New engineer onboarding
+
+Capture the knowledge a new teammate needs on day one.
+
+```bash
+memora init
+memora add --type project --content "Entry point: src/main.rs" --source code-read
+memora add --type procedural --content "Dev setup: make setup && make dev" --source manual
+memora add --type semantic --content "Auth uses JWT RS256" --source code-read --evidence "src/auth/jwt.rs:L42"
+memora commit -m "onboarding essentials"
+memora export --to claude-code
+```
+
+### 2) Risky refactor with a memory branch
+
+Branch memory before a risky change so you can merge or roll back cleanly.
+
+```bash
+memora branch experiment/refactor-auth
+memora switch experiment/refactor-auth
+memora add --type assumption --content "OAuth2 likely needed for enterprise SSO" --source model-inference
+memora commit -m "refactor hypotheses"
+memora switch main
+memora merge experiment/refactor-auth
+```
+
+### 3) Debugging a flaky test
+
+Record evidence and outcomes so the reasoning is inspectable later.
+
+```bash
+memora add --type episodic --content "Test fails only on Windows CI" --source test-result
+memora add --type semantic --content "File watcher uses inotify" --source code-read --evidence "src/fs/watch.rs:L88"
+memora commit -m "flaky test investigation"
+memora search "Windows"
+```
+
+---
+
 ## The typed memory model
 
 Not all memory is equal. memora splits memory into six typed categories,
