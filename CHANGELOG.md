@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-06-03
+
+### Added
+
+- Example use cases in the README to help users get started quickly.
+
 ## [0.1.0] - 2026-05-23
 
 The first public release. Implements the full v0.1 surface from `SPEC.md`.
@@ -52,5 +58,6 @@ The first public release. Implements the full v0.1 surface from `SPEC.md`.
   external services or runtime dependencies.
 - Format version 1; any non-backwards-compatible change will bump it.
 
-[Unreleased]: https://github.com/harshtripathi272/memora/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/harshtripathi272/memora/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/harshtripathi272/memora/releases/tag/v0.1.1
 [0.1.0]: https://github.com/harshtripathi272/memora/releases/tag/v0.1.0
